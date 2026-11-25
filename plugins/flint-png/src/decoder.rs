@@ -1,6 +1,6 @@
 use std::io::{self, BufRead, BufReader};
 
-use flint_sdk::{Decoder, Error, ImageInfo, PixelFormat, Result, RowsMut, Source};
+use flint_sdk::{Decoder, Error, ImageInformation, PixelFormat, Result, RowsMut, Source};
 use png::chunk::{IDAT, IEND, IHDR, acTL, eXIf, fcTL, fdAT};
 use png::{
     BitDepth, ColorType, DecodeOptions, Decoded, Info, StreamingDecoder, UnfilterBuf,
@@ -15,11 +15,13 @@ const DEFLATE_MAX_MATCH: usize = 258;
 const MAX_ROW_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EXIF_BYTES: u32 = 1024 * 1024;
 
-/// Reads non-interlaced Gray8 and RGB8 PNGs. Finishing validates the zlib
-/// trailer, PNG chunk CRCs and IEND. Packed rows are capped at 16 MiB and EXIF at 1 MiB.
+/**
+ * Reads non-interlaced Gray8 and RGB8 PNGs. Finishing validates the zlib
+ * trailer, PNG chunk CRCs and IEND. Packed rows are capped at 16 MiB and EXIF at 1 MiB.
+ */
 pub struct PngDecoder {
     stream: PngStream,
-    info: ImageInfo,
+    info: ImageInformation,
     raw: Vec<u8>,
     region: UnfilterRegion,
     row_start: usize,
@@ -38,6 +40,9 @@ impl Decoder for PngDecoder {
         header.starts_with(SIGNATURE)
     }
 
+    /**
+     * Read and validate the PNG header before allocating pixel row buffers.
+     */
     fn open(source: Source) -> Result<Self> {
         let mut stream = PngStream::new(source);
         while !matches!(stream.next(None)?, Decoded::ChunkComplete(IHDR)) {}
@@ -46,7 +51,7 @@ impl Decoder for PngDecoder {
         if header.width > i32::MAX as u32 || header.height > i32::MAX as u32 {
             return Err(Error::Invalid("PNG dimensions must fit in 31 bits".into()));
         }
-        let info = ImageInfo::new(header.width, header.height, format)?;
+        let info = ImageInformation::new(header.width, header.height, format)?;
         if info.row_bytes() > MAX_ROW_BYTES {
             return Err(Error::Limit("PNG packed row exceeds 16 MiB".into()));
         }
@@ -78,7 +83,7 @@ impl Decoder for PngDecoder {
         })
     }
 
-    fn info(&self) -> &ImageInfo {
+    fn info(&self) -> &ImageInformation {
         &self.info
     }
 

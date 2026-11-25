@@ -35,7 +35,7 @@ PNG input and output support non-interlaced Gray8 and RGB8. The PNG decoder reje
 
 JPEG output is baseline sequential at quality 85 by default, with 4:2:0 sampling for color. JPEG input is deferred. The bundled JPEG encoder needs a C compiler and enables MozJPEG's NEON support on AArch64 toolchains that support it.
 
-The default managed memory budget is 64 MiB and covers runtime pixel buffers and evaluator scratch space. `explain()` estimates those bytes. `save_with_stats()` and `write_with_stats()` report measured peak buffer capacity and the selected backend after a successful run. Codec allocations and process RSS are separate measurements.
+The default managed memory budget is 64 MiB and covers runtime pixel buffers and evaluator scratch space. `explain()` estimates those bytes. `save_with_statistics()` and `write_with_statistics()` report measured peak buffer capacity and the selected backend after a successful run. Codec allocations and process RSS are separate measurements.
 
 ## Build and extend
 

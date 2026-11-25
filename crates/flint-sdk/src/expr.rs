@@ -1,4 +1,4 @@
-use crate::{Error, ImageInfo, PixelFormat, Result};
+use crate::{Error, ImageInformation, PixelFormat, Result};
 use std::{
     iter::Sum,
     ops::{Add, Div, Mul, Sub},
@@ -143,8 +143,14 @@ impl Neighborhood {
     }
 }
 
+/**
+ * Describe an image operation by transforming its symbolic graph.
+ */
 pub trait Operation: Send + Sync {
-    fn apply(&self, image: ImageExpr) -> Result<ImageExpr>;
+    /**
+     * Return the transformed graph while preserving its source node.
+     */
+    fn apply(&self, image: ImageExpression) -> Result<ImageExpression>;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -160,14 +166,20 @@ pub enum Node {
     Stage(Stage),
 }
 
+/**
+ * An operation's programs and the upstream expression they read from.
+ */
 pub struct Stage {
-    input: ImageExpr,
+    input: ImageExpression,
     primitive: Primitive,
     programs: Vec<Expr>,
 }
 
 impl Stage {
-    pub fn input(&self) -> &ImageExpr {
+    /**
+     * Return the upstream expression that supplies this stage's samples.
+     */
+    pub fn input(&self) -> &ImageExpression {
         &self.input
     }
     pub fn primitive(&self) -> Primitive {
@@ -178,18 +190,26 @@ impl Stage {
     }
 }
 
+/**
+ * Store a graph node with its output metadata and depth from the source.
+ */
 struct ImageNode {
     node: Node,
-    info: ImageInfo,
+    info: ImageInformation,
     depth: usize,
 }
 
-/// An immutable image graph. Clones share the graph and carry no decoded pixels.
+/**
+ * An immutable image graph. Clones share the graph and carry no decoded pixels.
+ */
 #[derive(Clone)]
-pub struct ImageExpr(Arc<ImageNode>);
+pub struct ImageExpression(Arc<ImageNode>);
 
-impl ImageExpr {
-    pub fn source(info: ImageInfo) -> Self {
+impl ImageExpression {
+    /**
+     * Create a root node from metadata inspected by the decoder.
+     */
+    pub fn source(info: ImageInformation) -> Self {
         Self(Arc::new(ImageNode {
             node: Node::Source,
             info,
@@ -197,7 +217,10 @@ impl ImageExpr {
         }))
     }
 
-    pub fn info(&self) -> &ImageInfo {
+    /**
+     * Return the dimensions and pixel format at this point in the graph.
+     */
+    pub fn metadata(&self) -> &ImageInformation {
         &self.0.info
     }
 
@@ -205,9 +228,14 @@ impl ImageExpr {
         &self.0.node
     }
 
-    /// Identity of the source node is preserved when an operation appends stages.
+    /**
+     * Check whether both expressions share the same source node.
+     */
     pub fn shares_source(&self, other: &Self) -> bool {
-        fn root(mut image: &ImageExpr) -> &ImageExpr {
+        /**
+         * Follow the upstream inputs to the source node.
+         */
+        fn root(mut image: &ImageExpression) -> &ImageExpression {
             while let Node::Stage(stage) = image.node() {
                 image = stage.input();
             }
@@ -216,9 +244,11 @@ impl ImageExpr {
         Arc::ptr_eq(&root(self).0, &root(other).0)
     }
 
-    /// Build one expression that the runtime evaluates independently for every channel.
+    /**
+     * Build one expression that runs independently on each channel and preserves the format.
+     */
     pub fn map_color(self, build: impl FnOnce(Expr) -> Expr) -> Result<Self> {
-        let format = self.info().format();
+        let format = self.metadata().format();
         self.stage(
             Primitive::MapColor,
             format,
@@ -236,9 +266,11 @@ impl ImageExpr {
         self.stage(Primitive::MapPixel, pixel.format, pixel.channels)
     }
 
-    /// Build one expression using clamp-to-edge spatial samples in the active channel.
+    /**
+     * Build one expression using clamp-to-edge spatial samples in the active channel.
+     */
     pub fn stencil(self, build: impl FnOnce(Neighborhood) -> Expr) -> Result<Self> {
-        let format = self.info().format();
+        let format = self.metadata().format();
         self.stage(
             Primitive::Stencil,
             format,
@@ -246,6 +278,9 @@ impl ImageExpr {
         )
     }
 
+    /**
+     * Validate the programs against the primitive's sample rules and append a stage.
+     */
     fn stage(self, primitive: Primitive, format: PixelFormat, programs: Vec<Expr>) -> Result<Self> {
         let depth = self.0.depth + 1;
         if depth > MAX_STAGES {
@@ -278,7 +313,7 @@ impl ImageExpr {
             }
         }
 
-        let info = self.info().with_format(format)?;
+        let info = self.metadata().with_format(format)?;
         Ok(Self(Arc::new(ImageNode {
             node: Node::Stage(Stage {
                 input: self,

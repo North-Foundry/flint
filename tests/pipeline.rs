@@ -7,8 +7,8 @@ use std::sync::{
 #[cfg(all(feature = "png", feature = "jpeg"))]
 use flint::Image;
 use flint::sdk::{
-    Decoder, Destination, Encoder, ImageExpr, ImageInfo, Operation, Pixel, PixelFormat, Rows,
-    RowsMut, Source,
+    Decoder, Destination, Encoder, ImageExpression, ImageInformation, Operation, Pixel,
+    PixelFormat, Rows, RowsMut, Source,
 };
 use flint::{Backend, Engine, Error, Result};
 use flint_basic::{Brightness, GaussianBlur, Grayscale};
@@ -29,7 +29,7 @@ fn raw_image(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
 }
 
 struct RawDecoder {
-    info: ImageInfo,
+    info: ImageInformation,
     source: Source,
     rows_read: u32,
 }
@@ -51,13 +51,13 @@ impl Decoder for RawDecoder {
         let width = u32::from_le_bytes(header[4..8].try_into().unwrap());
         let height = u32::from_le_bytes(header[8..12].try_into().unwrap());
         Ok(Self {
-            info: ImageInfo::new(width, height, PixelFormat::Rgb8)?,
+            info: ImageInformation::new(width, height, PixelFormat::Rgb8)?,
             source,
             rows_read: 0,
         })
     }
 
-    fn info(&self) -> &ImageInfo {
+    fn info(&self) -> &ImageInformation {
         &self.info
     }
 
@@ -145,7 +145,7 @@ impl Decoder for CountingDecoder {
         Ok(Self(RawDecoder::open(source)?))
     }
 
-    fn info(&self) -> &ImageInfo {
+    fn info(&self) -> &ImageInformation {
         self.0.info()
     }
 
@@ -165,7 +165,7 @@ impl Encoder for CountingEncoder {
     const EXTENSIONS: &'static [&'static str] = &["counting-raw"];
     type Options = ();
 
-    fn open(destination: Destination, info: &ImageInfo, options: ()) -> Result<Self> {
+    fn open(destination: Destination, info: &ImageInformation, options: ()) -> Result<Self> {
         COUNTING_ENCODER_OPENS.fetch_add(1, Ordering::SeqCst);
         Ok(Self(RawEncoder::open(destination, info, options)?))
     }
@@ -184,7 +184,7 @@ impl Encoder for RawEncoder {
     const EXTENSIONS: &'static [&'static str] = &["fraw"];
     type Options = ();
 
-    fn open(mut destination: Destination, info: &ImageInfo, _: ()) -> Result<Self> {
+    fn open(mut destination: Destination, info: &ImageInformation, _: ()) -> Result<Self> {
         destination.write_all(MAGIC)?;
         destination.write_all(&info.width().to_le_bytes())?;
         destination.write_all(&info.height().to_le_bytes())?;
@@ -404,7 +404,7 @@ fn reference_gaussian(
 struct ShiftLeftThenDown;
 
 impl Operation for ShiftLeftThenDown {
-    fn apply(&self, image: ImageExpr) -> Result<ImageExpr> {
+    fn apply(&self, image: ImageExpression) -> Result<ImageExpression> {
         image.stencil(|n| n.at(-1, 0))?.stencil(|n| n.at(0, 1))
     }
 }
@@ -450,7 +450,7 @@ fn codec_registration_is_lazy_and_apply_does_not_decode() -> Result<()> {
         read_after_open,
         "apply must not decode pixels"
     );
-    assert_eq!(processed.info().width(), 3);
+    assert_eq!(processed.metadata().width(), 3);
     assert_eq!(
         COUNTING_ENCODER_OPENS.load(Ordering::SeqCst),
         encoder_before
@@ -506,7 +506,7 @@ fn arithmetic_semantics_match_in_vectors_and_scalar_tails() -> Result<()> {
     struct Arithmetic;
 
     impl Operation for Arithmetic {
-        fn apply(&self, image: ImageExpr) -> Result<ImageExpr> {
+        fn apply(&self, image: ImageExpression) -> Result<ImageExpression> {
             image.map_pixel(|p| {
                 Pixel::rgb(
                     ((p.r - 0.25) / 0.5).clamp(0.0, 1.0),
@@ -664,12 +664,12 @@ fn generated_large_image_streams_to_sink_with_height_independent_plan() -> Resul
     assert!(short_plan.managed_bytes <= memory_limit);
 
     let short_sink = Arc::new(SinkStats::default());
-    let short_stats = short.write_with_stats(
+    let short_stats = short.write_with_statistics(
         "fraw",
         Box::new(StatsWriter(short_sink.clone())) as Destination,
     )?;
     let tall_sink = Arc::new(SinkStats::default());
-    let tall_stats = tall.write_with_stats(
+    let tall_stats = tall.write_with_statistics(
         "fraw",
         Box::new(StatsWriter(tall_sink.clone())) as Destination,
     )?;

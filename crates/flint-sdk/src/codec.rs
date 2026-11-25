@@ -22,16 +22,21 @@ impl PixelFormat {
     }
 }
 
-/// Validated nonzero dimensions and a packed row size addressable on this host.
+/**
+ * Image dimensions, pixel format, and packed row size validated for this host.
+ */
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ImageInfo {
+pub struct ImageInformation {
     width: u32,
     height: u32,
     format: PixelFormat,
     row_bytes: usize,
 }
 
-impl ImageInfo {
+impl ImageInformation {
+    /**
+     * Validate that both dimensions are nonzero and a packed row is addressable.
+     */
     pub fn new(width: u32, height: u32, format: PixelFormat) -> Result<Self> {
         if width == 0 || height == 0 {
             return Err(Error::Invalid("image dimensions must be nonzero".into()));
@@ -67,7 +72,10 @@ impl ImageInfo {
     }
 }
 
-fn row_count(info: &ImageInfo, stride: usize, bytes: usize) -> Result<usize> {
+/**
+ * Validate a row buffer's stride and derive how many whole rows it contains.
+ */
+fn row_count(info: &ImageInformation, stride: usize, bytes: usize) -> Result<usize> {
     if stride < info.row_bytes() || !bytes.is_multiple_of(stride) {
         return Err(Error::Invalid(
             "row buffer must contain whole strides at least as wide as a packed row".into(),
@@ -80,16 +88,21 @@ fn row_count(info: &ImageInfo, stride: usize, bytes: usize) -> Result<usize> {
     Ok(count)
 }
 
-/// Borrowed encoder rows, in top-to-bottom order. Each stride includes any padding.
+/**
+ * Borrowed encoder rows in top-to-bottom order. Each stride includes any padding.
+ */
 pub struct Rows<'a> {
-    info: &'a ImageInfo,
+    info: &'a ImageInformation,
     stride: usize,
     count: usize,
     bytes: &'a [u8],
 }
 
 impl<'a> Rows<'a> {
-    pub fn new(info: &'a ImageInfo, stride: usize, bytes: &'a [u8]) -> Result<Self> {
+    /**
+     * Borrow a validated batch of whole rows from the input bytes.
+     */
+    pub fn new(info: &'a ImageInformation, stride: usize, bytes: &'a [u8]) -> Result<Self> {
         let count = row_count(info, stride, bytes.len())?;
         Ok(Self {
             info,
@@ -99,7 +112,10 @@ impl<'a> Rows<'a> {
         })
     }
 
-    pub const fn info(&self) -> &ImageInfo {
+    /**
+     * Return the image metadata used to interpret the borrowed rows.
+     */
+    pub const fn info(&self) -> &ImageInformation {
         self.info
     }
     pub const fn stride(&self) -> usize {
@@ -120,16 +136,21 @@ impl<'a> Rows<'a> {
     }
 }
 
-/// Runtime-owned decoder rows, borrowed only for the current call.
+/**
+ * Runtime-owned decoder rows, borrowed only for the current call.
+ */
 pub struct RowsMut<'a> {
-    info: &'a ImageInfo,
+    info: &'a ImageInformation,
     stride: usize,
     count: usize,
     bytes: &'a mut [u8],
 }
 
 impl<'a> RowsMut<'a> {
-    pub fn new(info: &'a ImageInfo, stride: usize, bytes: &'a mut [u8]) -> Result<Self> {
+    /**
+     * Borrow a validated batch of whole rows that the decoder can fill.
+     */
+    pub fn new(info: &'a ImageInformation, stride: usize, bytes: &'a mut [u8]) -> Result<Self> {
         let count = row_count(info, stride, bytes.len())?;
         Ok(Self {
             info,
@@ -139,7 +160,10 @@ impl<'a> RowsMut<'a> {
         })
     }
 
-    pub const fn info(&self) -> &ImageInfo {
+    /**
+     * Return the image metadata that the decoder's output must match.
+     */
+    pub const fn info(&self) -> &ImageInformation {
         self.info
     }
     pub const fn stride(&self) -> usize {
@@ -166,7 +190,9 @@ impl<'a> RowsMut<'a> {
     }
 }
 
-/// A sequential decoding session. A session can be dropped after metadata inspection.
+/**
+ * A sequential decoding session. A session can be dropped after metadata inspection.
+ */
 pub trait Decoder: Send + Sized + 'static {
     const NAME: &'static str;
     const EXTENSIONS: &'static [&'static str];
@@ -175,7 +201,10 @@ pub trait Decoder: Send + Sized + 'static {
     fn probe(header: &[u8]) -> bool;
     /// Open at the start of a stream and read its metadata.
     fn open(source: Source) -> Result<Self>;
-    fn info(&self) -> &ImageInfo;
+    /**
+     * Return the source metadata read during `open`.
+     */
+    fn info(&self) -> &ImageInformation;
 
     /// Fill a prefix of the provided rows and return its length. With a nonempty
     /// buffer, zero means end of image. A truncated image must return an error.
@@ -188,13 +217,22 @@ pub trait Decoder: Send + Sized + 'static {
     }
 }
 
-/// A sequential encoding session. Successful completion requires calling `finish`.
+/**
+ * A sequential encoding session. Successful completion requires calling `finish`.
+ */
 pub trait Encoder: Send + Sized + 'static {
     const NAME: &'static str;
     const EXTENSIONS: &'static [&'static str];
     type Options: Default;
 
-    fn open(destination: Destination, info: &ImageInfo, options: Self::Options) -> Result<Self>;
+    /**
+     * Start writing to the destination using the output image metadata and options.
+     */
+    fn open(
+        destination: Destination,
+        info: &ImageInformation,
+        options: Self::Options,
+    ) -> Result<Self>;
     /// Consume packed rows before returning. Reject rows that exceed the declared height.
     fn write_rows(&mut self, rows: Rows<'_>) -> Result<()>;
     /// Reject incomplete images and report trailer or flush errors.

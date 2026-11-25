@@ -4,28 +4,33 @@ use crate::{
     registry::{DecoderSession, SelectedDecoder, SelectedEncoder},
 };
 use flint_sdk::{
-    Destination, Error, Expr, ImageExpr, ImageInfo, Result, Rows, RowsMut, Source,
+    Destination, Error, Expr, ImageExpression, ImageInformation, Result, Rows, RowsMut, Source,
     graph::{Instruction, Stage},
 };
 use wide::f32x4;
 
-/// Observations from a completed execution.
+/**
+ * The selected backend and measured working memory from a completed execution.
+ */
 #[derive(Clone, Copy, Debug)]
-pub struct ExecutionStats {
+pub struct ExecutionStatistics {
     pub backend: Backend,
     /// Peak total capacity of managed pixel and evaluator buffers, in bytes.
     pub peak_managed_bytes: usize,
 }
 
+/**
+ * Run the graph row by row within the managed memory limit.
+ */
 pub fn execute(
-    image: &ImageExpr,
+    image: &ImageExpression,
     backend: Backend,
     memory_limit: usize,
     source: &dyn Fn() -> Result<Source>,
     decoder: SelectedDecoder,
     encoder: SelectedEncoder,
     destination: Destination,
-) -> Result<ExecutionStats> {
+) -> Result<ExecutionStatistics> {
     let plan = ExecutionPlan::analyze(image, decoder.name(), backend)?;
     check_budget(plan.managed_bytes, memory_limit)?;
     let mut decoder = decoder.session(source()?)?;
@@ -109,13 +114,16 @@ pub fn execute(
     Ok(stats)
 }
 
+/**
+ * Validate measured buffer capacity and record the execution statistics.
+ */
 fn stats(
     backend: Backend,
     peak_managed_bytes: usize,
     memory_limit: usize,
-) -> Result<ExecutionStats> {
+) -> Result<ExecutionStatistics> {
     check_budget(peak_managed_bytes, memory_limit)?;
-    Ok(ExecutionStats {
+    Ok(ExecutionStatistics {
         backend,
         peak_managed_bytes,
     })
@@ -129,7 +137,14 @@ fn buffer<T: Clone>(len: usize, value: T) -> Result<Vec<T>> {
     Ok(data)
 }
 
-fn decode_row(decoder: &mut dyn DecoderSession, info: &ImageInfo, bytes: &mut [u8]) -> Result<()> {
+/**
+ * Read exactly one packed row and validate the decoder's reported count.
+ */
+fn decode_row(
+    decoder: &mut dyn DecoderSession,
+    info: &ImageInformation,
+    bytes: &mut [u8],
+) -> Result<()> {
     let output = RowsMut::new(info, info.row_bytes(), bytes)?;
     match decoder.read_rows(output)? {
         1 => Ok(()),
@@ -142,7 +157,10 @@ fn decode_row(decoder: &mut dyn DecoderSession, info: &ImageInfo, bytes: &mut [u
     }
 }
 
-fn unpack(bytes: &[u8], info: ImageInfo, row: &mut [f32]) {
+/**
+ * Normalize packed byte samples into a planar floating-point row.
+ */
+fn unpack(bytes: &[u8], info: ImageInformation, row: &mut [f32]) {
     let width = info.width() as usize;
     for (channel, plane) in row.chunks_exact_mut(width).enumerate() {
         for (value, sample) in plane
@@ -154,7 +172,10 @@ fn unpack(bytes: &[u8], info: ImageInfo, row: &mut [f32]) {
     }
 }
 
-fn pack(row: &[f32], info: ImageInfo, bytes: &mut [u8]) {
+/**
+ * Quantize a planar floating-point row into packed byte samples.
+ */
+fn pack(row: &[f32], info: ImageInformation, bytes: &mut [u8]) {
     let width = info.width() as usize;
     for (channel, plane) in row.chunks_exact(width).enumerate() {
         for (sample, value) in bytes[channel..]
@@ -167,14 +188,20 @@ fn pack(row: &[f32], info: ImageInfo, bytes: &mut [u8]) {
     }
 }
 
+/**
+ * Store a bounded window of planar rows using circular indexing.
+ */
 struct Ring {
-    info: ImageInfo,
+    info: ImageInformation,
     capacity: usize,
     data: Vec<f32>,
 }
 
 impl Ring {
-    fn new(info: ImageInfo, capacity: usize) -> Result<Self> {
+    /**
+     * Allocate the ring for the specified row format and capacity.
+     */
+    fn new(info: ImageInformation, capacity: usize) -> Result<Self> {
         Ok(Self {
             info,
             capacity,

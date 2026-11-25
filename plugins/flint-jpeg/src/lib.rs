@@ -7,7 +7,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::ptr::NonNull;
 use std::slice;
 
-use flint_sdk::{Destination, Encoder, Error, ImageInfo, PixelFormat, Result, Rows};
+use flint_sdk::{Destination, Encoder, Error, ImageInformation, PixelFormat, Result, Rows};
 use mozjpeg_sys as _; // Link the bundled library used by the C bridge.
 
 /// JPEG quality must be in 1..=100. The default is 85.
@@ -22,12 +22,14 @@ impl Default for JpegOptions {
     }
 }
 
-/// Encodes borrowed scanlines as baseline sequential JPEG. RGB8 is converted
-/// to YCbCr with 4:2:0 chroma sampling. Gray8 uses a single luminance component.
+/**
+ * Encodes borrowed scanlines as baseline sequential JPEG. RGB8 is converted
+ * to YCbCr with 4:2:0 chroma sampling. Gray8 uses a single luminance component.
+ */
 pub struct JpegEncoder {
     session: Session,
     destination: Destination,
-    info: ImageInfo,
+    info: ImageInformation,
     remaining_rows: usize,
     failed: bool,
 }
@@ -37,7 +39,14 @@ impl Encoder for JpegEncoder {
     const EXTENSIONS: &'static [&'static str] = &["jpg", "jpeg"];
     type Options = JpegOptions;
 
-    fn open(destination: Destination, info: &ImageInfo, options: Self::Options) -> Result<Self> {
+    /**
+     * Validate the requested quality and dimensions and start the JPEG session.
+     */
+    fn open(
+        destination: Destination,
+        info: &ImageInformation,
+        options: Self::Options,
+    ) -> Result<Self> {
         if !(1..=100).contains(&options.quality) {
             return Err(Error::Invalid(
                 "JPEG quality must be between 1 and 100".into(),

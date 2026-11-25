@@ -1,5 +1,5 @@
 use flint_sdk::{
-    Error, ImageExpr, ImageInfo, Result,
+    Error, ImageExpression, ImageInformation, Result,
     graph::{Instruction, Node, Primitive, Stage},
 };
 use std::{fmt, mem::size_of};
@@ -49,12 +49,14 @@ fn simd_available() -> bool {
     }
 }
 
-/// An operation and the relative rectangle it needs from its input.
+/**
+ * An operation and the relative rectangle it needs from its input.
+ */
 #[derive(Clone, Debug)]
 pub struct StagePlan {
     pub primitive: Primitive,
-    pub input: ImageInfo,
-    pub output: ImageInfo,
+    pub input: ImageInformation,
+    pub output: ImageInformation,
     pub min_x: i32,
     pub max_x: i32,
     pub min_y: i32,
@@ -63,23 +65,31 @@ pub struct StagePlan {
     pub(crate) stack_depth: usize,
 }
 
+/**
+ * The resolved backend, source and output metadata, and row requirements for a graph.
+ */
 #[derive(Clone, Debug)]
 pub struct ExecutionPlan {
     pub source_format: &'static str,
-    pub source: ImageInfo,
-    pub output: ImageInfo,
+    pub source: ImageInformation,
+    pub output: ImageInformation,
     pub backend: Backend,
     pub stages: Vec<StagePlan>,
     /// Estimated bytes for the runtime's reusable pixel and evaluator buffers.
     pub managed_bytes: usize,
 }
 
-pub(crate) fn graph_stages(image: &ImageExpr) -> impl Iterator<Item = (&Stage, ImageInfo)> {
+/**
+ * Walk from the output toward the source, yielding each stage and its output metadata.
+ */
+pub(crate) fn graph_stages(
+    image: &ImageExpression,
+) -> impl Iterator<Item = (&Stage, ImageInformation)> {
     let mut current = image;
     std::iter::from_fn(move || match current.node() {
         Node::Source => None,
         Node::Stage(stage) => {
-            let output = *current.info();
+            let output = *current.metadata();
             current = stage.input();
             Some((stage, output))
         }
@@ -87,8 +97,11 @@ pub(crate) fn graph_stages(image: &ImageExpr) -> impl Iterator<Item = (&Stage, I
 }
 
 impl ExecutionPlan {
+    /**
+     * Resolve the backend and estimate the working memory needed by the graph.
+     */
     pub fn analyze(
-        image: &ImageExpr,
+        image: &ImageExpression,
         source_format: &'static str,
         backend: Backend,
     ) -> Result<Self> {
@@ -97,7 +110,7 @@ impl ExecutionPlan {
             .map(|(stage, output)| analyze_stage(stage, output))
             .collect();
         stages.reverse();
-        let output = *image.info();
+        let output = *image.metadata();
         let source = stages.first().map_or(output, |stage| stage.input);
         let mut managed_bytes = source.row_bytes();
         let mut max_stack = 0;
@@ -139,7 +152,10 @@ pub(crate) fn check_budget(bytes: usize, limit: usize) -> Result<()> {
     Ok(())
 }
 
-fn analyze_stage(stage: &Stage, output: ImageInfo) -> StagePlan {
+/**
+ * Derive the stage's spatial dependencies and evaluator stack size from its programs.
+ */
+fn analyze_stage(stage: &Stage, output: ImageInformation) -> StagePlan {
     let mut min_x = i32::MAX;
     let mut max_x = i32::MIN;
     let mut min_y = i32::MAX;
@@ -168,7 +184,7 @@ fn analyze_stage(stage: &Stage, output: ImageInfo) -> StagePlan {
     let buffered_rows = ((max_y - min_y + 1) as usize).min(output.height() as usize);
     StagePlan {
         primitive: stage.primitive(),
-        input: *stage.input().info(),
+        input: *stage.input().metadata(),
         output,
         min_x,
         max_x,
@@ -179,7 +195,10 @@ fn analyze_stage(stage: &Stage, output: ImageInfo) -> StagePlan {
     }
 }
 
-pub(crate) fn float_ring_bytes(info: ImageInfo, rows: usize) -> Result<usize> {
+/**
+ * Calculate the byte capacity for the requested number of floating-point rows.
+ */
+pub(crate) fn float_ring_bytes(info: ImageInformation, rows: usize) -> Result<usize> {
     multiply(multiply(info.row_bytes(), rows)?, size_of::<f32>())
 }
 

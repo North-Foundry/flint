@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use flint_jpeg::{JpegEncoder, JpegOptions};
-use flint_sdk::{Encoder, Error, ImageInfo, PixelFormat, Rows};
+use flint_sdk::{Encoder, Error, ImageInformation, PixelFormat, Rows};
 
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<u8>>>);
@@ -42,7 +42,7 @@ fn produces_baseline_gray_and_rgb_with_documented_sampling() {
         (PixelFormat::Gray8, &[1, 0x11, 0][..]),
         (PixelFormat::Rgb8, &[1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1][..]),
     ] {
-        let info = ImageInfo::new(3, 2, format).unwrap();
+        let info = ImageInformation::new(3, 2, format).unwrap();
         let output = Capture::default();
         let mut encoder =
             JpegEncoder::open(Box::new(output.clone()), &info, JpegOptions::default()).unwrap();
@@ -79,7 +79,7 @@ impl Write for CountBytes {
 
 #[test]
 fn writes_compressed_bytes_before_receiving_the_full_image() {
-    let info = ImageInfo::new(256, 1024, PixelFormat::Rgb8).unwrap();
+    let info = ImageInformation::new(256, 1024, PixelFormat::Rgb8).unwrap();
     let output = CountBytes::default();
     let mut encoder =
         JpegEncoder::open(Box::new(output.clone()), &info, JpegOptions::default()).unwrap();
@@ -121,8 +121,8 @@ impl Write for FailingDestination {
 
 #[test]
 fn reports_destination_errors_and_rejects_invalid_input() {
-    let info = ImageInfo::new(1, 2, PixelFormat::Gray8).unwrap();
-    let oversized = ImageInfo::new(65_501, 1, PixelFormat::Gray8).unwrap();
+    let info = ImageInformation::new(1, 2, PixelFormat::Gray8).unwrap();
+    let oversized = ImageInformation::new(65_501, 1, PixelFormat::Gray8).unwrap();
     assert!(matches!(
         JpegEncoder::open(Box::new(io::sink()), &oversized, JpegOptions::default()),
         Err(Error::Limit(_))
@@ -170,7 +170,7 @@ fn resumes_destination_panic_after_returning_from_c() {
         }
     }
 
-    let info = ImageInfo::new(1, 1, PixelFormat::Gray8).unwrap();
+    let info = ImageInformation::new(1, 1, PixelFormat::Gray8).unwrap();
     let mut encoder = JpegEncoder::open(Box::new(Panics), &info, JpegOptions::default()).unwrap();
     encoder
         .write_rows(Rows::new(&info, 1, &[42]).unwrap())

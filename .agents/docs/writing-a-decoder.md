@@ -23,11 +23,11 @@ The example format contains the four byte magic `GRAY`, followed by little endia
 ```rust
 use std::io::Read;
 
-use flint_sdk::{Decoder, Error, ImageInfo, PixelFormat, Result, RowsMut, Source};
+use flint_sdk::{Decoder, Error, ImageInformation, PixelFormat, Result, RowsMut, Source};
 
 pub struct RawGrayDecoder {
     source: Source,
-    info: ImageInfo,
+    info: ImageInformation,
     rows_left: usize,
 }
 
@@ -47,7 +47,7 @@ impl Decoder for RawGrayDecoder {
         }
         let width = u32::from_le_bytes(header[4..8].try_into().unwrap());
         let height = u32::from_le_bytes(header[8..12].try_into().unwrap());
-        let info = ImageInfo::new(width, height, PixelFormat::Gray8)?;
+        let info = ImageInformation::new(width, height, PixelFormat::Gray8)?;
         Ok(Self {
             source,
             rows_left: height as usize,
@@ -55,7 +55,7 @@ impl Decoder for RawGrayDecoder {
         })
     }
 
-    fn info(&self) -> &ImageInfo {
+    fn info(&self) -> &ImageInformation {
         &self.info
     }
 
@@ -73,7 +73,7 @@ impl Decoder for RawGrayDecoder {
 }
 ```
 
-`ImageInfo::new` rejects zero dimensions and unaddressable packed rows. `RowsMut::row_mut` excludes stride padding, so a decoder writes only packed pixel bytes. The runtime provides a nonempty buffer while rows remain. A zero return then signals end of image.
+`ImageInformation::new` rejects zero dimensions and unaddressable packed rows. `RowsMut::row_mut` excludes stride padding, so a decoder writes only packed pixel bytes. The runtime provides a nonempty buffer while rows remain. A zero return then signals end of image.
 
 `read_exact` turns truncated pixel data into an I/O error. Implement `finish` when the format has a footer, checksum, or trailing validation that must be checked after the declared rows are read. Keep decoder session state inside the decoder and avoid retaining runtime row buffers.
 

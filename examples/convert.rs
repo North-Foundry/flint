@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let image = Image::open(input)?;
     let plan = image.explain()?;
-    let stats = image.save_with_stats(output)?;
+    let stats = image.save_with_statistics(output)?;
     println!("backend={:?}", stats.backend);
     println!("peak_managed_bytes={}", stats.peak_managed_bytes);
     println!("estimated_managed_bytes={}", plan.managed_bytes);

@@ -1,14 +1,22 @@
-use flint_sdk::{Decoder, Destination, Encoder, Error, ImageInfo, Result, Rows, RowsMut, Source};
+use flint_sdk::{
+    Decoder, Destination, Encoder, Error, ImageInformation, Result, Rows, RowsMut, Source,
+};
 use std::io::{Cursor, Read};
 
+/**
+ * Adapt an SDK decoder for use through a boxed session.
+ */
 pub(crate) trait DecoderSession {
-    fn info(&self) -> &ImageInfo;
+    /**
+     * Return the metadata reported by the underlying decoder.
+     */
+    fn info(&self) -> &ImageInformation;
     fn read_rows(&mut self, output: RowsMut<'_>) -> Result<usize>;
     fn finish(self: Box<Self>) -> Result<()>;
 }
 
 impl<T: Decoder> DecoderSession for T {
-    fn info(&self) -> &ImageInfo {
+    fn info(&self) -> &ImageInformation {
         Decoder::info(self)
     }
     fn read_rows(&mut self, output: RowsMut<'_>) -> Result<usize> {
@@ -37,9 +45,12 @@ fn open_decoder<T: Decoder>(source: Source) -> Result<Box<dyn DecoderSession>> {
     Ok(Box::new(T::open(source)?))
 }
 
+/**
+ * Open a concrete encoder using its default options and return a boxed session.
+ */
 fn open_encoder<T: Encoder>(
     destination: Destination,
-    info: &ImageInfo,
+    info: &ImageInformation,
 ) -> Result<Box<dyn EncoderSession>> {
     Ok(Box::new(T::open(destination, info, T::Options::default())?))
 }
@@ -63,7 +74,10 @@ impl SelectedDecoder {
     }
 }
 
-type OpenEncoder = fn(Destination, &ImageInfo) -> Result<Box<dyn EncoderSession>>;
+/**
+ * Factory that opens a session for the selected encoder.
+ */
+type OpenEncoder = fn(Destination, &ImageInformation) -> Result<Box<dyn EncoderSession>>;
 
 #[derive(Clone, Copy)]
 pub struct SelectedEncoder {
@@ -72,10 +86,13 @@ pub struct SelectedEncoder {
 }
 
 impl SelectedEncoder {
+    /**
+     * Open an encoding session using the graph's output metadata.
+     */
     pub(crate) fn session(
         self,
         destination: Destination,
-        info: &ImageInfo,
+        info: &ImageInformation,
     ) -> Result<Box<dyn EncoderSession>> {
         (self.open)(destination, info)
     }
@@ -103,7 +120,10 @@ impl Registry {
         });
     }
 
-    pub fn inspect(&self, mut source: Source) -> Result<(SelectedDecoder, ImageInfo)> {
+    /**
+     * Match the source prefix against registered decoders and read the image metadata.
+     */
+    pub fn inspect(&self, mut source: Source) -> Result<(SelectedDecoder, ImageInformation)> {
         let mut prefix = [0; 64];
         let mut len = 0;
         while len < prefix.len() {

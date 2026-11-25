@@ -1,19 +1,10 @@
-use crate::{Engine, ExecutionPlan, ExecutionStats};
+use crate::{Engine, ExecutionPlan, ExecutionStatistics};
 use flint_core::{SelectedDecoder, SelectedEncoder, execute};
-use flint_sdk::{Destination, Error, ImageExpr, ImageInfo, Operation, Result, Source};
+use flint_sdk::{Destination, Error, ImageExpression, ImageInformation, Operation, Result, Source};
 use std::{
     path::Path,
     sync::{Arc, OnceLock},
 };
-
-// TODO: Expand abbreviated names owned by Flint.
-// - Rename `ImageExpr` to `ImageExpression` and `ImageInfo` to `ImageInformation`.
-// - Rename `Image::info()` and `ImageExpr::info()` to `metadata()`.
-// - Rename `ExecutionStats` to `ExecutionStatistics`.
-// - Rename `save_with_stats()` and `write_with_stats()` to `save_with_statistics()`
-//   and `write_with_statistics()`.
-// - Rename `p` in the destination directory filter to `parent_path`.
-// - Review expanding the `flint_sdk` crate name across the workspace.
 
 /**
  * A reusable symbolic image whose operations run when the image is saved or written.
@@ -23,7 +14,7 @@ use std::{
 #[derive(Clone)]
 pub struct Image {
     engine: Engine,
-    expression: ImageExpr,
+    expression: ImageExpression,
     decoder: SelectedDecoder,
     source: Arc<dyn Fn() -> Result<Source> + Send + Sync>,
 }
@@ -35,13 +26,13 @@ impl Image {
      */
     pub(super) fn from_source(
         engine: Engine,
-        metadata: ImageInfo,
+        metadata: ImageInformation,
         decoder: SelectedDecoder,
         source: impl Fn() -> Result<Source> + Send + Sync + 'static,
     ) -> Self {
         Self {
             engine,
-            expression: ImageExpr::source(metadata),
+            expression: ImageExpression::source(metadata),
             decoder,
             source: Arc::new(source),
         }
@@ -62,8 +53,8 @@ impl Image {
     /**
      * Return the output dimensions and pixel format described by the current graph.
      */
-    pub fn info(&self) -> &ImageInfo {
-        self.expression.info()
+    pub fn metadata(&self) -> &ImageInformation {
+        self.expression.metadata()
     }
 
     /**
@@ -104,14 +95,14 @@ impl Image {
      * The destination is replaced only after the staged output completes successfully.
      */
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
-        self.save_with_stats(path).map(drop)
+        self.save_with_statistics(path).map(drop)
     }
 
     /**
      * Save the image as in [`Self::save`] and report the selected backend and peak
      * capacity of the managed working buffers.
      */
-    pub fn save_with_stats(&self, path: impl AsRef<Path>) -> Result<ExecutionStats> {
+    pub fn save_with_statistics(&self, path: impl AsRef<Path>) -> Result<ExecutionStatistics> {
         let path = std::path::absolute(path)?;
         let extension = path
             .extension()
@@ -122,7 +113,7 @@ impl Image {
         let encoder = self.engine.settings().registry.encoder(extension)?;
         let parent = path
             .parent()
-            .filter(|p| !p.as_os_str().is_empty())
+            .filter(|parent_path| !parent_path.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         let temporary = tempfile::NamedTempFile::new_in(parent)?;
         let statistics = self.write_to(encoder, Box::new(temporary.reopen()?))?;
@@ -136,18 +127,18 @@ impl Image {
      * An execution error may leave partial output in the destination.
      */
     pub fn write(&self, extension: &str, destination: Destination) -> Result<()> {
-        self.write_with_stats(extension, destination).map(drop)
+        self.write_with_statistics(extension, destination).map(drop)
     }
 
     /**
      * Write the image as in [`Self::write`] and report the selected backend and peak
      * capacity of the managed working buffers.
      */
-    pub fn write_with_stats(
+    pub fn write_with_statistics(
         &self,
         extension: &str,
         destination: Destination,
-    ) -> Result<ExecutionStats> {
+    ) -> Result<ExecutionStatistics> {
         self.write_to(
             self.engine.settings().registry.encoder(extension)?,
             destination,
@@ -161,7 +152,7 @@ impl Image {
         &self,
         encoder: SelectedEncoder,
         destination: Destination,
-    ) -> Result<ExecutionStats> {
+    ) -> Result<ExecutionStatistics> {
         let settings = self.engine.settings();
         execute(
             &self.expression,

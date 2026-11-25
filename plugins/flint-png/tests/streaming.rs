@@ -2,7 +2,9 @@ use std::io::{self, Read, Write};
 use std::sync::{Arc, Mutex};
 
 use flint_png::{PngDecoder, PngEncoder};
-use flint_sdk::{Decoder, Encoder, Error, ImageInfo, PixelFormat, Result, Rows, RowsMut, Source};
+use flint_sdk::{
+    Decoder, Encoder, Error, ImageInformation, PixelFormat, Result, Rows, RowsMut, Source,
+};
 use png::chunk::{ChunkType, IDAT, IHDR, acTL, eXIf, tRNS};
 
 #[derive(Clone, Default)]
@@ -40,7 +42,7 @@ impl Read for ByteAtATime {
 #[test]
 fn round_trips_padded_rows_through_a_forward_only_source() {
     for format in [PixelFormat::Gray8, PixelFormat::Rgb8] {
-        let info = ImageInfo::new(2, 2, format).unwrap();
+        let info = ImageInformation::new(2, 2, format).unwrap();
         let packed = info.row_bytes();
         let stride = packed + 2;
         let input: Vec<u8> = (0..(2 * stride) as u8).collect();
@@ -147,7 +149,7 @@ fn rejects_transparency_and_high_precision() {
     }
 }
 
-fn encode(info: &ImageInfo, filter: png::Filter, pixels: &[u8]) -> Vec<u8> {
+fn encode(info: &ImageInformation, filter: png::Filter, pixels: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::new();
     let mut encoder = png::Encoder::new(&mut bytes, info.width(), info.height());
     encoder.set_color(match info.format() {
@@ -189,7 +191,7 @@ fn matches_reference_for_all_filters_across_inflate_windows() {
     ];
     for format in [PixelFormat::Gray8, PixelFormat::Rgb8] {
         // Vary both neighbors and generate repeated segments across inflate windows.
-        let info = ImageInfo::new(701, 117, format).unwrap();
+        let info = ImageInformation::new(701, 117, format).unwrap();
         let pixels: Vec<_> = (0..info.height() as usize)
             .flat_map(|y| {
                 (0..info.row_bytes()).map(move |x| (17 * x + (y % 13) * (3 + (x % 29))) as u8)
@@ -241,7 +243,7 @@ fn png_with_chunks(width: u32, height: u32, chunks: &[(ChunkType, &[u8])]) -> Ve
 fn verifies_split_zlib_trailers_after_delivering_pixels() {
     // The filtered image exactly fills the larger inflate window. The decoder
     // must compact it before validating the trailer with spare output space.
-    let info = ImageInfo::new(32_896, 3, PixelFormat::Gray8).unwrap();
+    let info = ImageInformation::new(32_896, 3, PixelFormat::Gray8).unwrap();
     let expected = vec![42; info.row_bytes() * info.height() as usize];
     let payload = compressed_payload(&encode(&info, png::Filter::Paeth, &expected));
     let (deflate, adler) = payload.split_at(payload.len() - 4);
@@ -272,7 +274,7 @@ fn verifies_split_zlib_trailers_after_delivering_pixels() {
 fn checksums_queued_matches_across_inflate_window_compaction() {
     // This RGB stream needs to drain a queued DEFLATE match near a window end.
     // Giving fdeflate 0.3.7 just one spare byte can produce WrongChecksum here.
-    let info = ImageInfo::new(2048, 512, PixelFormat::Rgb8).unwrap();
+    let info = ImageInformation::new(2048, 512, PixelFormat::Rgb8).unwrap();
     let expected: Vec<_> = (0..info.height() as usize)
         .flat_map(|y| (0..info.row_bytes()).map(move |x| (17 * x + (y % 33) * (3 + x % 29)) as u8))
         .collect();
@@ -282,7 +284,7 @@ fn checksums_queued_matches_across_inflate_window_compaction() {
 
 #[test]
 fn validates_the_decompressed_size_and_idat_completion() {
-    let info = ImageInfo::new(2, 1, PixelFormat::Gray8).unwrap();
+    let info = ImageInformation::new(2, 1, PixelFormat::Gray8).unwrap();
     let payload = compressed_payload(&encode(&info, png::Filter::NoFilter, &[42, 43]));
     for width in [1, 3] {
         let bytes = png_with_chunks(width, 1, &[(IDAT, &payload)]);
@@ -305,7 +307,7 @@ fn validates_the_decompressed_size_and_idat_completion() {
 
 #[test]
 fn bounds_png_metadata_and_row_allocations() {
-    let info = ImageInfo::new(1, 1, PixelFormat::Gray8).unwrap();
+    let info = ImageInformation::new(1, 1, PixelFormat::Gray8).unwrap();
     let fixture = encode(&info, png::Filter::NoFilter, &[42]);
     let payload = compressed_payload(&fixture);
     let unknown = ChunkType(*b"vpAg");
@@ -361,7 +363,7 @@ fn rejects_zero_dimensions_and_transparency_on_either_side_of_idat() {
         ));
     }
 
-    let info = ImageInfo::new(1, 1, PixelFormat::Gray8).unwrap();
+    let info = ImageInformation::new(1, 1, PixelFormat::Gray8).unwrap();
     let payload = compressed_payload(&encode(&info, png::Filter::NoFilter, &[42]));
     let image = (IDAT, payload.as_slice());
     let transparency = (tRNS, &[0, 42][..]);
@@ -404,7 +406,7 @@ impl Write for FailingDestination {
 
 #[test]
 fn reports_iend_and_flush_errors_and_rejects_missing_rows() {
-    let info = ImageInfo::new(1, 1, PixelFormat::Gray8).unwrap();
+    let info = ImageInformation::new(1, 1, PixelFormat::Gray8).unwrap();
     for (fail_at_iend, message) in [(true, "IEND failed"), (false, "flush failed")] {
         let dest = Box::new(FailingDestination { fail_at_iend });
         let mut encoder = PngEncoder::open(dest, &info, ()).unwrap();

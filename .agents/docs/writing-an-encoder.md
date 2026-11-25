@@ -23,11 +23,11 @@ This encoder writes the `GRAY` format described in the decoder guide. It accepts
 ```rust
 use std::io::Write;
 
-use flint_sdk::{Destination, Encoder, Error, ImageInfo, PixelFormat, Result, Rows};
+use flint_sdk::{Destination, Encoder, Error, ImageInformation, PixelFormat, Result, Rows};
 
 pub struct RawGrayEncoder {
     destination: Destination,
-    info: ImageInfo,
+    info: ImageInformation,
     rows_written: usize,
 }
 
@@ -38,7 +38,7 @@ impl Encoder for RawGrayEncoder {
 
     fn open(
         mut destination: Destination,
-        info: &ImageInfo,
+        info: &ImageInformation,
         (): Self::Options,
     ) -> Result<Self> {
         if info.format() != PixelFormat::Gray8 {

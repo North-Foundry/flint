@@ -1,6 +1,6 @@
 # Writing an operation
 
-An operation implements `flint_sdk::Operation` and builds an immutable expression graph. The closures passed to `ImageExpr` primitives run once during graph construction. Flint evaluates their expressions over image samples when a consumer saves or writes the image.
+An operation implements `flint_sdk::Operation` and builds an immutable expression graph. The closures passed to `ImageExpression` primitives run once during graph construction. Flint evaluates their expressions over image samples when a consumer saves or writes the image.
 
 ## Crate setup
 
@@ -21,7 +21,7 @@ flint-sdk = { path = "../../crates/flint-sdk" }
 This operation adds a different normalized amount to each RGB channel. `map_pixel` also declares the output pixel format through `Pixel::rgb`.
 
 ```rust
-use flint_sdk::{ImageExpr, Operation, Pixel, Result};
+use flint_sdk::{ImageExpression, Operation, Pixel, Result};
 
 pub struct Tint {
     pub red: f32,
@@ -30,7 +30,7 @@ pub struct Tint {
 }
 
 impl Operation for Tint {
-    fn apply(&self, image: ImageExpr) -> Result<ImageExpr> {
+    fn apply(&self, image: ImageExpression) -> Result<ImageExpression> {
         image.map_pixel(|p| {
             Pixel::rgb(
                 (p.r + self.red).clamp(0.0, 1.0),
@@ -66,4 +66,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`ImageExpr::info()` returns the current `ImageInfo` by reference. Use it to inspect dimensions or format when choosing an algorithm. Return SDK errors for invalid parameters, and keep pixel iteration, buffers, and execution policy in the runtime.
+`ImageExpression::metadata()` returns the current `ImageInformation` by reference. Use it to inspect dimensions or format when choosing an algorithm. Return SDK errors for invalid parameters, and keep pixel iteration, buffers, and execution policy in the runtime.

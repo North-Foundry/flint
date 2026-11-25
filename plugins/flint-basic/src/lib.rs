@@ -1,6 +1,6 @@
 //! Basic image operations built only from Flint's public SDK.
 
-use flint_sdk::{Error, Expr, ImageExpr, Operation, Pixel, Result};
+use flint_sdk::{Error, Expr, ImageExpression, Operation, Pixel, Result};
 
 /// Adds an amount to every normalized color channel.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -15,7 +15,7 @@ impl Brightness {
 }
 
 impl Operation for Brightness {
-    fn apply(&self, image: ImageExpr) -> Result<ImageExpr> {
+    fn apply(&self, image: ImageExpression) -> Result<ImageExpression> {
         image.map_color(|x| (x + self.amount).clamp(0.0, 1.0))
     }
 }
@@ -26,7 +26,7 @@ impl Operation for Brightness {
 pub struct Grayscale;
 
 impl Operation for Grayscale {
-    fn apply(&self, image: ImageExpr) -> Result<ImageExpr> {
+    fn apply(&self, image: ImageExpression) -> Result<ImageExpression> {
         image.map_pixel(|p| Pixel::gray(p.r * 0.2126 + p.g * 0.7152 + p.b * 0.0722))
     }
 }
@@ -77,7 +77,7 @@ impl GaussianBlur {
 }
 
 impl Operation for GaussianBlur {
-    fn apply(&self, image: ImageExpr) -> Result<ImageExpr> {
+    fn apply(&self, image: ImageExpression) -> Result<ImageExpression> {
         let radius = self.radius()?;
         let weights = self.weights(radius);
 

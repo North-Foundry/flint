@@ -12,8 +12,8 @@ use std::{
 use flint::{
     Backend, Engine,
     sdk::{
-        Decoder, Destination, Encoder, Error as FlintError, ImageInfo, PixelFormat, Result, Rows,
-        RowsMut, Source,
+        Decoder, Destination, Encoder, Error as FlintError, ImageInformation, PixelFormat, Result,
+        Rows, RowsMut, Source,
     },
 };
 use flint_basic::{GaussianBlur, Grayscale};
@@ -62,13 +62,13 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
     let plan = image.explain()?;
     let checksum = Arc::new(AtomicU64::new(0));
 
-    image.write_with_stats("bench", Box::new(ChecksumSink::new(Arc::clone(&checksum))))?;
+    image.write_with_statistics("bench", Box::new(ChecksumSink::new(Arc::clone(&checksum))))?;
     let start = Instant::now();
     let mut peak_managed_bytes = 0;
     let mut selected_backend = plan.backend;
     for _ in 0..iterations {
-        let stats =
-            image.write_with_stats("bench", Box::new(ChecksumSink::new(Arc::clone(&checksum))))?;
+        let stats = image
+            .write_with_statistics("bench", Box::new(ChecksumSink::new(Arc::clone(&checksum))))?;
         peak_managed_bytes = peak_managed_bytes.max(stats.peak_managed_bytes);
         selected_backend = stats.backend;
     }
@@ -89,7 +89,7 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
 }
 
 struct BenchDecoder {
-    info: ImageInfo,
+    info: ImageInformation,
     next_row: u32,
 }
 
@@ -112,12 +112,12 @@ impl Decoder for BenchDecoder {
         let width = u32::from_le_bytes(header[4..8].try_into().unwrap());
         let height = u32::from_le_bytes(header[8..12].try_into().unwrap());
         Ok(Self {
-            info: ImageInfo::new(width, height, PixelFormat::Rgb8)?,
+            info: ImageInformation::new(width, height, PixelFormat::Rgb8)?,
             next_row: 0,
         })
     }
 
-    fn info(&self) -> &ImageInfo {
+    fn info(&self) -> &ImageInformation {
         &self.info
     }
 
@@ -147,7 +147,7 @@ impl Decoder for BenchDecoder {
 
 struct BenchEncoder {
     destination: Destination,
-    info: ImageInfo,
+    info: ImageInformation,
     rows_written: u32,
 }
 
@@ -156,7 +156,7 @@ impl Encoder for BenchEncoder {
     const EXTENSIONS: &'static [&'static str] = &["bench"];
     type Options = ();
 
-    fn open(destination: Destination, info: &ImageInfo, (): Self::Options) -> Result<Self> {
+    fn open(destination: Destination, info: &ImageInformation, (): Self::Options) -> Result<Self> {
         Ok(Self {
             destination,
             info: *info,

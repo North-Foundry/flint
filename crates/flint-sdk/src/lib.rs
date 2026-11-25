@@ -3,8 +3,12 @@
 mod codec;
 mod expr;
 
-pub use codec::{Decoder, Destination, Encoder, ImageInfo, PixelFormat, Rows, RowsMut, Source};
-pub use expr::{Expr, ImageExpr, MAX_STENCIL_OFFSET, Neighborhood, Operation, Pixel, PixelSamples};
+pub use codec::{
+    Decoder, Destination, Encoder, ImageInformation, PixelFormat, Rows, RowsMut, Source,
+};
+pub use expr::{
+    Expr, ImageExpression, MAX_STENCIL_OFFSET, Neighborhood, Operation, Pixel, PixelSamples,
+};
 
 /// Read-only execution contracts for runtimes consuming the SDK's graph.
 pub mod graph {

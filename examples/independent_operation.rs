@@ -1,13 +1,13 @@
 //! A third-party style operation using only the public SDK contracts.
 
 use flint::Image;
-use flint_sdk::{ImageExpr, Operation, Result};
+use flint_sdk::{ImageExpression, Operation, Result};
 
 /// Inverts normalized RGB color channels.
 struct Invert;
 
 impl Operation for Invert {
-    fn apply(&self, image: ImageExpr) -> Result<ImageExpr> {
+    fn apply(&self, image: ImageExpression) -> Result<ImageExpression> {
         image.map_color(|channel| 1.0 - channel)
     }
 }

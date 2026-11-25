@@ -1,14 +1,16 @@
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
-use flint_sdk::{Destination, Encoder, Error, ImageInfo, PixelFormat, Result, Rows};
+use flint_sdk::{Destination, Encoder, Error, ImageInformation, PixelFormat, Result, Rows};
 use png::{BitDepth, ColorType, EncodingError, StreamWriter};
 
-/// Encodes Gray8 and RGB8 rows to a non-interlaced PNG stream.
+/**
+ * Encodes Gray8 and RGB8 rows to a non-interlaced PNG stream.
+ */
 pub struct PngEncoder {
     writer: StreamWriter<'static, CheckedDestination>,
     destination: CheckedDestination,
-    info: ImageInfo,
+    info: ImageInformation,
     remaining_rows: usize,
     failed: bool,
 }
@@ -18,7 +20,10 @@ impl Encoder for PngEncoder {
     const EXTENSIONS: &'static [&'static str] = &["png"];
     type Options = ();
 
-    fn open(destination: Destination, info: &ImageInfo, (): Self::Options) -> Result<Self> {
+    /**
+     * Check the encoder's dimension limits and write the PNG header.
+     */
+    fn open(destination: Destination, info: &ImageInformation, (): Self::Options) -> Result<Self> {
         let remaining_rows = info.height() as usize;
         // PNG dimensions are 31-bit, and png's StreamWriter counts packed bytes in usize.
         if info.width() > i32::MAX as u32

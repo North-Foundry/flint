@@ -1,13 +1,19 @@
+use self::{
+    eval::{Scratch, evaluate_row},
+    rows::{Ring, pack, unpack},
+};
 use crate::{
     Backend, ExecutionPlan, StagePlan,
-    plan::{check_budget, float_ring_bytes, graph_stages},
-    registry::{DecoderSession, SelectedDecoder, SelectedEncoder},
+    codec::{DecoderSession, SelectedDecoder, SelectedEncoder},
+    plan::{check_budget, graph_stages},
 };
 use flint_sdk::{
-    Destination, Error, Expr, ImageExpression, ImageInformation, Result, Rows, RowsMut, Source,
-    graph::{Instruction, Stage},
+    Destination, Error, ImageExpression, ImageInformation, Result, Rows, RowsMut, Source,
+    graph::Stage,
 };
-use wide::f32x4;
+
+mod eval;
+mod rows;
 
 /**
  * The selected backend and measured working memory from a completed execution.
@@ -80,14 +86,7 @@ pub fn execute(
         .map(|stage| stage.stack_depth)
         .max()
         .unwrap_or(0);
-    let mut scratch = Scratch {
-        scalar: buffer(stack_depth, 0.0)?,
-        vector: if plan.backend == Backend::Simd {
-            buffer(stack_depth, f32x4::ZERO)?
-        } else {
-            Vec::new()
-        },
-    };
+    let mut scratch = Scratch::new(stack_depth, plan.backend)?;
     // These buffers coexist throughout processing. Their capacities never change.
     let peak_managed_bytes = source.bytes.capacity()
         + output_bytes.capacity()
@@ -96,8 +95,7 @@ pub fn execute(
             .iter()
             .map(|stage| stage.pixels.capacity_bytes())
             .sum::<usize>()
-        + scratch.scalar.capacity() * size_of::<f32>()
-        + scratch.vector.capacity() * size_of::<f32x4>();
+        + scratch.capacity_bytes();
     let stats = stats(plan.backend, peak_managed_bytes, memory_limit)?;
     let mut encoder = encoder.session(destination, &plan.output)?;
 
@@ -157,78 +155,6 @@ fn decode_row(
     }
 }
 
-/**
- * Normalize packed byte samples into a planar floating-point row.
- */
-fn unpack(bytes: &[u8], info: ImageInformation, row: &mut [f32]) {
-    let width = info.width() as usize;
-    for (channel, plane) in row.chunks_exact_mut(width).enumerate() {
-        for (value, sample) in plane
-            .iter_mut()
-            .zip(bytes[channel..].iter().step_by(info.format().channels()))
-        {
-            *value = f32::from(*sample) / 255.0;
-        }
-    }
-}
-
-/**
- * Quantize a planar floating-point row into packed byte samples.
- */
-fn pack(row: &[f32], info: ImageInformation, bytes: &mut [u8]) {
-    let width = info.width() as usize;
-    for (channel, plane) in row.chunks_exact(width).enumerate() {
-        for (sample, value) in bytes[channel..]
-            .iter_mut()
-            .step_by(info.format().channels())
-            .zip(plane)
-        {
-            *sample = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
-        }
-    }
-}
-
-/**
- * Store a bounded window of planar rows using circular indexing.
- */
-struct Ring {
-    info: ImageInformation,
-    capacity: usize,
-    data: Vec<f32>,
-}
-
-impl Ring {
-    /**
-     * Allocate the ring for the specified row format and capacity.
-     */
-    fn new(info: ImageInformation, capacity: usize) -> Result<Self> {
-        Ok(Self {
-            info,
-            capacity,
-            data: buffer(float_ring_bytes(info, capacity)? / size_of::<f32>(), 0.0)?,
-        })
-    }
-
-    fn capacity_bytes(&self) -> usize {
-        self.data.capacity() * size_of::<f32>()
-    }
-
-    fn row_range(&self, index: usize) -> std::ops::Range<usize> {
-        let len = self.info.row_bytes(); // A packed byte row contains one byte per sample.
-        let start = (index % self.capacity) * len;
-        start..start + len
-    }
-
-    fn row(&self, index: usize) -> &[f32] {
-        &self.data[self.row_range(index)]
-    }
-
-    fn row_mut(&mut self, index: usize) -> &mut [f32] {
-        let range = self.row_range(index);
-        &mut self.data[range]
-    }
-}
-
 struct FloatSource {
     decoder: Box<dyn DecoderSession>,
     pixels: Ring,
@@ -238,7 +164,7 @@ struct FloatSource {
 
 impl FloatSource {
     fn advance(&mut self, y: usize) -> Result<()> {
-        let info = self.pixels.info;
+        let info = self.pixels.info();
         while self.next <= y {
             decode_row(&mut *self.decoder, &info, &mut self.bytes)?;
             unpack(&self.bytes, info, self.pixels.row_mut(self.next));
@@ -253,11 +179,6 @@ struct StageState<'a> {
     analysis: &'a StagePlan,
     pixels: Ring,
     next: usize,
-}
-
-struct Scratch {
-    scalar: Vec<f32>,
-    vector: Vec<f32x4>,
 }
 
 // Pull upstream through the highest required row. The inferred span guarantees
@@ -289,130 +210,4 @@ fn offset(position: usize, delta: i32, extent: usize) -> usize {
     position
         .saturating_add_signed(delta as isize)
         .min(extent - 1)
-}
-
-fn evaluate_row(stage: &Stage, input: &Ring, y: usize, output: &mut [f32], scratch: &mut Scratch) {
-    let width = input.info.width() as usize;
-    let programs = stage.programs();
-    for (channel, plane) in output.chunks_exact_mut(width).enumerate() {
-        let program = &programs[if programs.len() == 1 { 0 } else { channel }];
-        let mut vector_end = 0;
-        if !scratch.vector.is_empty() {
-            let (groups, tail) = plane.as_chunks_mut::<4>();
-            for (group, pixels) in groups.iter_mut().enumerate() {
-                *pixels = evaluate(program, input, (group * 4, y), channel, &mut scratch.vector)
-                    .to_array();
-            }
-            vector_end = width - tail.len();
-        }
-        for (x, pixel) in plane.iter_mut().enumerate().skip(vector_end) {
-            *pixel = evaluate(program, input, (x, y), channel, &mut scratch.scalar);
-        }
-    }
-}
-
-trait Lane:
-    Copy
-    + std::ops::Add<Output = Self>
-    + std::ops::Sub<Output = Self>
-    + std::ops::Mul<Output = Self>
-    + std::ops::Div<Output = Self>
-{
-    fn splat(value: f32) -> Self;
-    fn sample(row: &[f32], x: usize, dx: i32) -> Self;
-    fn min(self, rhs: Self) -> Self;
-    fn max(self, rhs: Self) -> Self;
-}
-
-impl Lane for f32 {
-    #[inline(always)]
-    fn splat(value: f32) -> Self {
-        value
-    }
-    #[inline(always)]
-    fn sample(row: &[f32], x: usize, dx: i32) -> Self {
-        row[offset(x, dx, row.len())]
-    }
-    #[inline(always)]
-    fn min(self, rhs: Self) -> Self {
-        f32::min(self, rhs) + 0.0
-    }
-    #[inline(always)]
-    fn max(self, rhs: Self) -> Self {
-        f32::max(self, rhs) + 0.0
-    }
-}
-
-impl Lane for f32x4 {
-    #[inline(always)]
-    fn splat(value: f32) -> Self {
-        f32x4::splat(value)
-    }
-    #[inline(always)]
-    fn sample(row: &[f32], x: usize, dx: i32) -> Self {
-        // Interior vectors load contiguous samples. At an edge, clamp each lane independently.
-        if let Some(start) = x.checked_add_signed(dx as isize)
-            && let Some(samples) = row.get(start..start + 4)
-        {
-            return f32x4::new(samples.try_into().expect("four contiguous samples"));
-        }
-        f32x4::new(std::array::from_fn(|lane| {
-            row[offset(x + lane, dx, row.len())]
-        }))
-    }
-    #[inline(always)]
-    fn min(self, rhs: Self) -> Self {
-        f32x4::min(self, rhs) + f32x4::ZERO
-    }
-    #[inline(always)]
-    fn max(self, rhs: Self) -> Self {
-        f32x4::max(self, rhs) + f32x4::ZERO
-    }
-}
-
-#[inline]
-fn evaluate<T: Lane>(
-    program: &Expr,
-    input: &Ring,
-    (x, y): (usize, usize),
-    channel: usize,
-    stack: &mut [T],
-) -> T {
-    let width = input.info.width() as usize;
-    let height = input.info.height() as usize;
-    let last_channel = input.info.format().channels() - 1;
-    let mut depth = 0;
-    for &instruction in program.instructions() {
-        match instruction {
-            Instruction::Constant(value) => {
-                stack[depth] = T::splat(value);
-                depth += 1;
-            }
-            Instruction::Sample {
-                dx,
-                dy,
-                channel: selected,
-            } => {
-                let row = input.row(offset(y, dy, height));
-                let channel = selected.unwrap_or(channel).min(last_channel);
-                stack[depth] = T::sample(&row[channel * width..][..width], x, dx);
-                depth += 1;
-            }
-            operator => {
-                let lhs = stack[depth - 2];
-                let rhs = stack[depth - 1];
-                depth -= 1;
-                stack[depth - 1] = match operator {
-                    Instruction::Add => lhs + rhs,
-                    Instruction::Sub => lhs - rhs,
-                    Instruction::Mul => lhs * rhs,
-                    Instruction::Div => lhs / rhs,
-                    Instruction::Min => lhs.min(rhs),
-                    Instruction::Max => lhs.max(rhs),
-                    _ => unreachable!("non-binary instruction"),
-                };
-            }
-        }
-    }
-    stack[0]
 }

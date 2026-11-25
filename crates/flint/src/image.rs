@@ -6,30 +6,52 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-/// A reusable symbolic image. Cloning shares the source and expression graph.
+// TODO: Expand abbreviated names owned by Flint.
+// - Rename `ImageExpr` to `ImageExpression` and `ImageInfo` to `ImageInformation`.
+// - Rename `Image::info()` and `ImageExpr::info()` to `metadata()`.
+// - Rename `ExecutionStats` to `ExecutionStatistics`.
+// - Rename `save_with_stats()` and `write_with_stats()` to `save_with_statistics()`
+//   and `write_with_statistics()`.
+// - Rename `p` in the destination directory filter to `parent_path`.
+// - Review expanding the `flint_sdk` crate name across the workspace.
+
+/**
+ * A reusable symbolic image whose operations run when the image is saved or written.
+ *
+ * Clones share the source and the existing expression graph.
+ */
 #[derive(Clone)]
 pub struct Image {
     engine: Engine,
-    expr: ImageExpr,
+    expression: ImageExpr,
     decoder: SelectedDecoder,
     source: Arc<dyn Fn() -> Result<Source> + Send + Sync>,
 }
 
 impl Image {
+    /**
+     * Create the source node from inspected metadata and retain the stream factory
+     * for future executions.
+     */
     pub(super) fn from_source(
         engine: Engine,
-        info: ImageInfo,
+        metadata: ImageInfo,
         decoder: SelectedDecoder,
         source: impl Fn() -> Result<Source> + Send + Sync + 'static,
     ) -> Self {
         Self {
             engine,
-            expr: ImageExpr::source(info),
+            expression: ImageExpr::source(metadata),
             decoder,
             source: Arc::new(source),
         }
     }
 
+    /**
+     * Inspect an image file using the shared default engine.
+     *
+     * Each execution reopens the file from the beginning.
+     */
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         static DEFAULT: OnceLock<Engine> = OnceLock::new();
         DEFAULT
@@ -37,40 +59,63 @@ impl Image {
             .open(path)
     }
 
+    /**
+     * Return the output dimensions and pixel format described by the current graph.
+     */
     pub fn info(&self) -> &ImageInfo {
-        self.expr.info()
+        self.expression.info()
     }
 
+    /**
+     * Consume this image and use the operation to construct the returned image's graph.
+     * Pixel processing begins when the image is saved or written.
+     *
+     * # Errors
+     *
+     * Propagates errors from the operation and returns [`Error::Invalid`] if the
+     * resulting graph has a different source.
+     */
     pub fn apply(mut self, operation: impl Operation) -> Result<Self> {
-        let expr = operation.apply(self.expr.clone())?;
-        if !self.expr.shares_source(&expr) {
+        let expression = operation.apply(self.expression.clone())?;
+        if !self.expression.shares_source(&expression) {
             return Err(Error::Invalid(
                 "operation returned a graph with a different source".into(),
             ));
         }
-        self.expr = expr;
+        self.expression = expression;
         Ok(self)
     }
 
+    /**
+     * Analyze the expression graph and metadata to report the selected backend,
+     * row dependencies, and estimated working memory.
+     */
     pub fn explain(&self) -> Result<ExecutionPlan> {
         ExecutionPlan::analyze(
-            &self.expr,
+            &self.expression,
             self.decoder.name(),
             self.engine.settings().backend,
         )
     }
 
-    /// Stream to a private file beside the destination and replace it after success.
+    /**
+     * Save using the encoder for the destination's file extension.
+     *
+     * The destination is replaced only after the staged output completes successfully.
+     */
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         self.save_with_stats(path).map(drop)
     }
 
-    /// Save the image and report the backend and measured managed buffer capacity.
+    /**
+     * Save the image as in [`Self::save`] and report the selected backend and peak
+     * capacity of the managed working buffers.
+     */
     pub fn save_with_stats(&self, path: impl AsRef<Path>) -> Result<ExecutionStats> {
         let path = std::path::absolute(path)?;
         let extension = path
             .extension()
-            .and_then(|ext| ext.to_str())
+            .and_then(|extension| extension.to_str())
             .ok_or_else(|| {
                 Error::Unsupported("destination must have a recognized extension".into())
             })?;
@@ -80,17 +125,24 @@ impl Image {
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         let temporary = tempfile::NamedTempFile::new_in(parent)?;
-        let stats = self.write_to(encoder, Box::new(temporary.reopen()?))?;
+        let statistics = self.write_to(encoder, Box::new(temporary.reopen()?))?;
         temporary.persist(path).map_err(|error| error.error)?;
-        Ok(stats)
+        Ok(statistics)
     }
 
-    /// Stream to a sequential destination. An execution error may leave partial output.
+    /**
+     * Write to a sequential destination using the encoder for the given extension.
+     *
+     * An execution error may leave partial output in the destination.
+     */
     pub fn write(&self, extension: &str, destination: Destination) -> Result<()> {
         self.write_with_stats(extension, destination).map(drop)
     }
 
-    /// Write to a sequential destination and report measured managed buffer capacity.
+    /**
+     * Write the image as in [`Self::write`] and report the selected backend and peak
+     * capacity of the managed working buffers.
+     */
     pub fn write_with_stats(
         &self,
         extension: &str,
@@ -102,6 +154,9 @@ impl Image {
         )
     }
 
+    /**
+     * Run the graph with the selected encoder and the engine's execution settings.
+     */
     fn write_to(
         &self,
         encoder: SelectedEncoder,
@@ -109,7 +164,7 @@ impl Image {
     ) -> Result<ExecutionStats> {
         let settings = self.engine.settings();
         execute(
-            &self.expr,
+            &self.expression,
             settings.backend,
             settings.memory_limit,
             &*self.source,

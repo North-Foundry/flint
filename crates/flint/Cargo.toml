@@ -1,0 +1,40 @@
+[package]
+name = "flint"
+description = "Lazy, streaming image processing"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[features]
+default = ["png", "jpeg"]
+png = ["dep:flint-png"]
+jpeg = ["dep:flint-jpeg"]
+
+[dependencies]
+flint-sdk.workspace = true
+flint-core.workspace = true
+flint-png = { workspace = true, optional = true }
+flint-jpeg = { workspace = true, optional = true }
+tempfile = "3"
+
+[dev-dependencies]
+flint-basic.workspace = true
+png = "0.18"
+
+[[test]]
+name = "pipeline"
+path = "../../tests/pipeline.rs"
+
+[[example]]
+name = "independent_operation"
+path = "../../examples/independent_operation.rs"
+required-features = ["png"]
+
+[[example]]
+name = "convert"
+path = "../../examples/convert.rs"
+required-features = ["png", "jpeg"]
+
+[[example]]
+name = "bench_ops"
+path = "../../examples/bench_ops.rs"

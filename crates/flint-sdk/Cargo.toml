@@ -1,0 +1,6 @@
+[package]
+name = "flint-sdk"
+description = "Public codec and symbolic operation contracts for Flint"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true

@@ -1,0 +1,811 @@
+use std::io::{Cursor, Read, Write};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
+
+#[cfg(all(feature = "png", feature = "jpeg"))]
+use flint::Image;
+use flint::sdk::{
+    Decoder, Destination, Encoder, ImageExpr, ImageInfo, Operation, Pixel, PixelFormat, Rows,
+    RowsMut, Source,
+};
+use flint::{Backend, Engine, Error, Result};
+use flint_basic::{Brightness, GaussianBlur, Grayscale};
+
+const MAGIC: &[u8; 4] = b"FRAW";
+
+fn raw_image(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|size| size.checked_mul(PixelFormat::Rgb8.channels()))
+        .expect("fixture dimensions fit address space");
+    assert_eq!(pixels.len(), expected);
+    let mut bytes = MAGIC.to_vec();
+    bytes.extend_from_slice(&width.to_le_bytes());
+    bytes.extend_from_slice(&height.to_le_bytes());
+    bytes.extend_from_slice(pixels);
+    bytes
+}
+
+struct RawDecoder {
+    info: ImageInfo,
+    source: Source,
+    rows_read: u32,
+}
+
+impl Decoder for RawDecoder {
+    const NAME: &'static str = "test raw RGB";
+    const EXTENSIONS: &'static [&'static str] = &["fraw"];
+
+    fn probe(header: &[u8]) -> bool {
+        header.starts_with(MAGIC)
+    }
+
+    fn open(mut source: Source) -> Result<Self> {
+        let mut header = [0; 12];
+        source.read_exact(&mut header)?;
+        if &header[..4] != MAGIC {
+            return Err(Error::Invalid("bad raw image signature".into()));
+        }
+        let width = u32::from_le_bytes(header[4..8].try_into().unwrap());
+        let height = u32::from_le_bytes(header[8..12].try_into().unwrap());
+        Ok(Self {
+            info: ImageInfo::new(width, height, PixelFormat::Rgb8)?,
+            source,
+            rows_read: 0,
+        })
+    }
+
+    fn info(&self) -> &ImageInfo {
+        &self.info
+    }
+
+    fn read_rows(&mut self, mut output: RowsMut<'_>) -> Result<usize> {
+        let count = output
+            .len()
+            .min((self.info.height() - self.rows_read) as usize);
+        for row in 0..count {
+            self.source
+                .read_exact(output.row_mut(row))
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                        Error::Codec("truncated raw image pixels".into())
+                    } else {
+                        error.into()
+                    }
+                })?;
+        }
+        self.rows_read += count as u32;
+        Ok(count)
+    }
+}
+
+#[derive(Clone, Default)]
+struct Capture(Arc<Mutex<Vec<u8>>>);
+
+impl Capture {
+    fn bytes(&self) -> Vec<u8> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+impl Write for SharedWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct SinkStats {
+    calls: AtomicUsize,
+    bytes: AtomicUsize,
+}
+
+struct StatsWriter(Arc<SinkStats>);
+
+impl Write for StatsWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.calls.fetch_add(1, Ordering::Relaxed);
+        self.0.bytes.fetch_add(bytes.len(), Ordering::Relaxed);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct RawEncoder {
+    destination: Destination,
+}
+
+static COUNTING_DECODER_OPENS: AtomicUsize = AtomicUsize::new(0);
+static COUNTING_ENCODER_OPENS: AtomicUsize = AtomicUsize::new(0);
+
+struct CountingDecoder(RawDecoder);
+
+impl Decoder for CountingDecoder {
+    const NAME: &'static str = "counting test raw RGB";
+    const EXTENSIONS: &'static [&'static str] = &["counting-raw"];
+
+    fn probe(header: &[u8]) -> bool {
+        RawDecoder::probe(header)
+    }
+
+    fn open(source: Source) -> Result<Self> {
+        COUNTING_DECODER_OPENS.fetch_add(1, Ordering::SeqCst);
+        Ok(Self(RawDecoder::open(source)?))
+    }
+
+    fn info(&self) -> &ImageInfo {
+        self.0.info()
+    }
+
+    fn read_rows(&mut self, rows: RowsMut<'_>) -> Result<usize> {
+        self.0.read_rows(rows)
+    }
+
+    fn finish(self) -> Result<()> {
+        self.0.finish()
+    }
+}
+
+struct CountingEncoder(RawEncoder);
+
+impl Encoder for CountingEncoder {
+    const NAME: &'static str = "counting test raw RGB encoder";
+    const EXTENSIONS: &'static [&'static str] = &["counting-raw"];
+    type Options = ();
+
+    fn open(destination: Destination, info: &ImageInfo, options: ()) -> Result<Self> {
+        COUNTING_ENCODER_OPENS.fetch_add(1, Ordering::SeqCst);
+        Ok(Self(RawEncoder::open(destination, info, options)?))
+    }
+
+    fn write_rows(&mut self, rows: Rows<'_>) -> Result<()> {
+        self.0.write_rows(rows)
+    }
+
+    fn finish(self) -> Result<()> {
+        self.0.finish()
+    }
+}
+
+impl Encoder for RawEncoder {
+    const NAME: &'static str = "test raw RGB encoder";
+    const EXTENSIONS: &'static [&'static str] = &["fraw"];
+    type Options = ();
+
+    fn open(mut destination: Destination, info: &ImageInfo, _: ()) -> Result<Self> {
+        destination.write_all(MAGIC)?;
+        destination.write_all(&info.width().to_le_bytes())?;
+        destination.write_all(&info.height().to_le_bytes())?;
+        Ok(Self { destination })
+    }
+
+    fn write_rows(&mut self, rows: Rows<'_>) -> Result<()> {
+        for row in 0..rows.len() {
+            self.destination.write_all(rows.row(row))?;
+        }
+        self.destination.flush()?;
+        Ok(())
+    }
+
+    fn finish(self) -> Result<()> {
+        Ok(())
+    }
+}
+
+fn engine() -> Result<Engine> {
+    Engine::builder()
+        .register_decoder::<RawDecoder>()
+        .register_encoder::<RawEncoder>()
+        .build()
+}
+
+fn raw_engine(backend: Backend) -> Result<Engine> {
+    Engine::builder()
+        .backend(backend)
+        .register_decoder::<RawDecoder>()
+        .register_encoder::<RawEncoder>()
+        .build()
+}
+
+fn limited_raw_engine(backend: Backend, memory_limit: usize) -> Result<Engine> {
+    Engine::builder()
+        .backend(backend)
+        .memory_limit(memory_limit)
+        .register_decoder::<RawDecoder>()
+        .register_encoder::<RawEncoder>()
+        .build()
+}
+
+struct CountingReader {
+    inner: Cursor<Vec<u8>>,
+    bytes_read: Arc<AtomicUsize>,
+    max_chunk: usize,
+}
+
+impl Read for CountingReader {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        let limit = output.len().min(self.max_chunk);
+        let count = self.inner.read(&mut output[..limit])?;
+        self.bytes_read.fetch_add(count, Ordering::SeqCst);
+        Ok(count)
+    }
+}
+
+fn source(
+    bytes: Vec<u8>,
+    bytes_read: Arc<AtomicUsize>,
+) -> impl Fn() -> Result<Source> + Send + Sync {
+    move || {
+        Ok(Box::new(CountingReader {
+            inner: Cursor::new(bytes.clone()),
+            bytes_read: bytes_read.clone(),
+            max_chunk: 5,
+        }))
+    }
+}
+
+struct GeneratedReader {
+    header: [u8; 12],
+    position: u128,
+    total: u128,
+}
+
+impl GeneratedReader {
+    fn new(width: u32, height: u32) -> Self {
+        let mut header = [0; 12];
+        header[..4].copy_from_slice(MAGIC);
+        header[4..8].copy_from_slice(&width.to_le_bytes());
+        header[8..12].copy_from_slice(&height.to_le_bytes());
+        Self {
+            header,
+            position: 0,
+            total: 12 + u128::from(width) * u128::from(height) * 3,
+        }
+    }
+}
+
+impl Read for GeneratedReader {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = self.total.saturating_sub(self.position);
+        let count = output
+            .len()
+            .min(usize::try_from(remaining).unwrap_or(usize::MAX));
+        for (index, byte) in output[..count].iter_mut().enumerate() {
+            let offset = self.position + index as u128;
+            *byte = if offset < 12 {
+                self.header[offset as usize]
+            } else {
+                let pixel_index = offset - 12;
+                ((pixel_index * 73 + pixel_index / 11 * 19 + 31) % 256) as u8
+            };
+        }
+        self.position += count as u128;
+        Ok(count)
+    }
+}
+
+fn generated_source(width: u32, height: u32) -> impl Fn() -> Result<Source> + Send + Sync {
+    move || Ok(Box::new(GeneratedReader::new(width, height)))
+}
+
+fn render<O: flint::sdk::Operation>(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    operation: O,
+    backend: Backend,
+) -> Result<Vec<u8>> {
+    let capture = Capture::default();
+    let engine = raw_engine(backend)?;
+    let image = engine.open_source(source(
+        raw_image(width, height, pixels),
+        Arc::new(AtomicUsize::new(0)),
+    ))?;
+    image.apply(operation)?.write(
+        "fraw",
+        Box::new(SharedWriter(capture.0.clone())) as Destination,
+    )?;
+    Ok(capture.bytes()[12..].to_vec())
+}
+
+fn reference_brightness(pixels: &[u8], amount: f32) -> Vec<u8> {
+    pixels
+        .iter()
+        .map(|&sample| quantize(sample as f32 / 255.0 + amount))
+        .collect()
+}
+
+fn quantize(value: f32) -> u8 {
+    let value = if value.is_finite() { value } else { 0.0 };
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn reference_gray(rgb: &[u8]) -> Vec<u8> {
+    rgb.as_chunks::<3>()
+        .0
+        .iter()
+        .map(|p| {
+            quantize(
+                p[0] as f32 / 255.0 * 0.2126
+                    + p[1] as f32 / 255.0 * 0.7152
+                    + p[2] as f32 / 255.0 * 0.0722,
+            )
+        })
+        .collect()
+}
+
+fn reference_gaussian(
+    rgb: &[u8],
+    width: usize,
+    height: usize,
+    sigma: f32,
+    quantize_between_passes: bool,
+) -> Vec<u8> {
+    let radius = (3.0 * sigma).ceil() as i32;
+    let mut weights: Vec<f32> = (-radius..=radius)
+        .map(|offset| {
+            (-(f64::from(offset).powi(2)) / (2.0 * f64::from(sigma).powi(2))).exp() as f32
+        })
+        .collect();
+    let sum: f32 = weights.iter().sum();
+    weights.iter_mut().for_each(|weight| *weight /= sum);
+
+    let sample =
+        |pixels: &[f32], x: usize, y: usize, channel: usize| pixels[(y * width + x) * 3 + channel];
+    let source: Vec<f32> = rgb.iter().map(|&value| f32::from(value) / 255.0).collect();
+    let mut horizontal = vec![0.0; rgb.len()];
+    for y in 0..height {
+        for x in 0..width {
+            for channel in 0..3 {
+                let mut value = 0.0_f32;
+                for offset in -radius..=radius {
+                    let sample_x = x.saturating_add_signed(offset as isize).min(width - 1);
+                    value +=
+                        sample(&source, sample_x, y, channel) * weights[(offset + radius) as usize];
+                }
+                horizontal[(y * width + x) * 3 + channel] = if quantize_between_passes {
+                    f32::from(quantize(value)) / 255.0
+                } else {
+                    value
+                };
+            }
+        }
+    }
+
+    let mut result = vec![0; rgb.len()];
+    for y in 0..height {
+        for x in 0..width {
+            for channel in 0..3 {
+                let mut value = 0.0_f32;
+                for offset in -radius..=radius {
+                    let sample_y = y.saturating_add_signed(offset as isize).min(height - 1);
+                    value += sample(&horizontal, x, sample_y, channel)
+                        * weights[(offset + radius) as usize];
+                }
+                result[(y * width + x) * 3 + channel] = quantize(value);
+            }
+        }
+    }
+    result
+}
+
+struct ShiftLeftThenDown;
+
+impl Operation for ShiftLeftThenDown {
+    fn apply(&self, image: ImageExpr) -> Result<ImageExpr> {
+        image.stencil(|n| n.at(-1, 0))?.stencil(|n| n.at(0, 1))
+    }
+}
+
+#[test]
+fn codec_registration_is_lazy_and_apply_does_not_decode() -> Result<()> {
+    let decoder_before = COUNTING_DECODER_OPENS.load(Ordering::SeqCst);
+    let encoder_before = COUNTING_ENCODER_OPENS.load(Ordering::SeqCst);
+    let factory_calls = Arc::new(AtomicUsize::new(0));
+    let bytes_read = Arc::new(AtomicUsize::new(0));
+    let input = raw_image(3, 2, &[10; 18]);
+    let factory_calls_for_source = factory_calls.clone();
+    let source_bytes_read = bytes_read.clone();
+    let engine = Engine::builder()
+        .register_decoder::<CountingDecoder>()
+        .register_encoder::<CountingEncoder>()
+        .build()?;
+    assert_eq!(
+        COUNTING_DECODER_OPENS.load(Ordering::SeqCst),
+        decoder_before
+    );
+    assert_eq!(
+        COUNTING_ENCODER_OPENS.load(Ordering::SeqCst),
+        encoder_before
+    );
+    let image = engine.open_source(move || {
+        factory_calls_for_source.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(CountingReader {
+            inner: Cursor::new(input.clone()),
+            bytes_read: source_bytes_read.clone(),
+            max_chunk: 5,
+        }))
+    })?;
+    assert_eq!(
+        COUNTING_DECODER_OPENS.load(Ordering::SeqCst),
+        decoder_before + 1
+    );
+    assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+    let read_after_open = bytes_read.load(Ordering::SeqCst);
+    let processed = image.apply(Brightness::new(0.1))?;
+    assert_eq!(
+        bytes_read.load(Ordering::SeqCst),
+        read_after_open,
+        "apply must not decode pixels"
+    );
+    assert_eq!(processed.info().width(), 3);
+    assert_eq!(
+        COUNTING_ENCODER_OPENS.load(Ordering::SeqCst),
+        encoder_before
+    );
+    let sink_stats = Arc::new(SinkStats::default());
+    processed.write(
+        "counting-raw",
+        Box::new(StatsWriter(sink_stats)) as Destination,
+    )?;
+    assert_eq!(
+        COUNTING_DECODER_OPENS.load(Ordering::SeqCst),
+        decoder_before + 2
+    );
+    assert_eq!(
+        COUNTING_ENCODER_OPENS.load(Ordering::SeqCst),
+        encoder_before + 1
+    );
+    assert_eq!(factory_calls.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+#[test]
+fn brightness_matches_independent_reference() -> Result<()> {
+    let input = [0, 12, 64, 128, 200, 255];
+    assert_eq!(
+        render(&input, 2, 1, Brightness::new(0.125), Backend::Scalar)?,
+        reference_brightness(&input, 0.125)
+    );
+    Ok(())
+}
+
+#[test]
+fn grayscale_reference_uses_encoded_space_luma() {
+    assert_eq!(reference_gray(&[255, 0, 0]), [54]);
+    assert_eq!(reference_gray(&[0, 255, 0]), [182]);
+    assert_eq!(reference_gray(&[0, 0, 255]), [18]);
+}
+
+#[test]
+fn grayscale_and_simd_match_scalar_reference() -> Result<()> {
+    // Seven pixels exercise a vector tail on common SIMD widths.
+    let input: Vec<u8> = (0..21).map(|i| (i * 37) as u8).collect();
+    let expected = reference_gray(&input);
+    assert_eq!(render(&input, 7, 1, Grayscale, Backend::Scalar)?, expected);
+    let simd = render(&input, 7, 1, Grayscale, Backend::Simd)?;
+    assert_eq!(simd, expected);
+    Ok(())
+}
+
+#[test]
+fn arithmetic_semantics_match_in_vectors_and_scalar_tails() -> Result<()> {
+    #[derive(Clone, Copy)]
+    struct Arithmetic;
+
+    impl Operation for Arithmetic {
+        fn apply(&self, image: ImageExpr) -> Result<ImageExpr> {
+            image.map_pixel(|p| {
+                Pixel::rgb(
+                    ((p.r - 0.25) / 0.5).clamp(0.0, 1.0),
+                    1.0 / (p.g * -0.0).min(0.0),
+                    (p.b / 0.0).min(f32::from_bits(0x7f80_0001)),
+                )
+            })
+        }
+    }
+
+    let rgb = [
+        [0, 20, 0],
+        [255, 50, 1],
+        [127, 40, 0],
+        [1, 70, 2],
+        [200, 25, 3],
+        [10, 55, 0],
+        [252, 0, 0],
+    ];
+    let input = rgb.as_flattened();
+    let expected: Vec<_> = rgb
+        .into_iter()
+        .flat_map(|[r, _, b]| {
+            [
+                quantize((f32::from(r) / 255.0 - 0.25) / 0.5),
+                255,
+                if b == 0 { 0 } else { 255 },
+            ]
+        })
+        .collect();
+    assert_eq!(render(input, 7, 1, Arithmetic, Backend::Scalar)?, expected);
+    assert_eq!(render(input, 7, 1, Arithmetic, Backend::Simd)?, expected);
+    Ok(())
+}
+
+#[test]
+fn gaussian_rejects_invalid_or_oversized_sigma() -> Result<()> {
+    let image = raw_engine(Backend::Scalar)?.open_source(generated_source(4, 4))?;
+    for sigma in [0.0, -1.0, f32::INFINITY, f32::NAN] {
+        assert!(matches!(
+            image.clone().apply(GaussianBlur::new(sigma)),
+            Err(Error::Invalid(_))
+        ));
+    }
+    assert!(matches!(
+        image.apply(GaussianBlur::new(f32::MAX)),
+        Err(Error::Limit(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn gaussian_matches_unquantized_two_pass_reference() -> Result<()> {
+    let width = 9;
+    let height = 7;
+    let input: Vec<u8> = (0..width * height * 3)
+        .map(|i| ((i * 73 + i / 11 * 19 + 31) % 256) as u8)
+        .collect();
+    let expected = reference_gaussian(&input, width, height, 1.0, false);
+    let quantized_between_passes = reference_gaussian(&input, width, height, 1.0, true);
+    assert_ne!(expected, quantized_between_passes);
+    assert_eq!(
+        render(
+            &input,
+            width as u32,
+            height as u32,
+            GaussianBlur::new(1.0),
+            Backend::Scalar
+        )?,
+        expected
+    );
+    Ok(())
+}
+
+#[test]
+fn signed_offsets_borders_and_consecutive_stages_match_reference() -> Result<()> {
+    let (width, height) = (4_usize, 3_usize);
+    let input: Vec<u8> = (0..height)
+        .flat_map(|y| {
+            (0..width).flat_map(move |x| {
+                let value = (10 + y * 50 + x * 7) as u8;
+                [value, value + 1, value + 2]
+            })
+        })
+        .collect();
+    let mut expected = Vec::with_capacity(input.len());
+    for y in 0..height {
+        for x in 0..width {
+            let source_x = x.saturating_sub(1);
+            let source_y = (y + 1).min(height - 1);
+            let pixel = (source_y * width + source_x) * 3;
+            expected.extend_from_slice(&input[pixel..pixel + 3]);
+        }
+    }
+    assert_eq!(
+        render(
+            &input,
+            width as u32,
+            height as u32,
+            ShiftLeftThenDown,
+            Backend::Scalar
+        )?,
+        expected
+    );
+
+    let plan = raw_engine(Backend::Scalar)?
+        .open_source(generated_source(width as u32, height as u32))?
+        .apply(ShiftLeftThenDown)?
+        .explain()?;
+    assert_eq!((plan.stages[0].min_x, plan.stages[0].max_x), (-1, -1));
+    assert_eq!((plan.stages[0].min_y, plan.stages[0].max_y), (0, 0));
+    assert_eq!((plan.stages[1].min_y, plan.stages[1].max_y), (1, 1));
+    Ok(())
+}
+
+#[test]
+fn stencil_plan_reports_spatial_dependencies_and_bounded_rows() -> Result<()> {
+    let small = raw_engine(Backend::Scalar)?
+        .open_source(generated_source(8, 24))?
+        .apply(GaussianBlur::new(1.0))?;
+    let large = raw_engine(Backend::Scalar)?
+        .open_source(generated_source(8, 1200))?
+        .apply(GaussianBlur::new(1.0))?;
+    let small_plan = small.explain()?;
+    let large_plan = large.explain()?;
+    assert_eq!(small_plan.backend, Backend::Scalar);
+    assert_eq!(large_plan.backend, Backend::Scalar);
+    assert!(small_plan.stages.iter().any(|s| s.min_y < 0 || s.max_y > 0));
+    assert!(
+        large_plan
+            .stages
+            .iter()
+            .map(|s| s.buffered_rows)
+            .max()
+            .unwrap_or(0)
+            < 1200
+    );
+    assert_eq!(small_plan.managed_bytes, large_plan.managed_bytes);
+    Ok(())
+}
+
+#[test]
+fn generated_large_image_streams_to_sink_with_height_independent_plan() -> Result<()> {
+    let (width, short_height, tall_height) = (9, 64, 10_000);
+    let memory_limit = 1_000_000;
+    let short = limited_raw_engine(Backend::Scalar, memory_limit)?
+        .open_source(generated_source(width, short_height))?
+        .apply(GaussianBlur::new(1.0))?;
+    let tall = limited_raw_engine(Backend::Scalar, memory_limit)?
+        .open_source(generated_source(width, tall_height))?
+        .apply(GaussianBlur::new(1.0))?;
+    let short_plan = short.explain()?;
+    let tall_plan = tall.explain()?;
+    assert_eq!(short_plan.managed_bytes, tall_plan.managed_bytes);
+    assert!(short_plan.managed_bytes <= memory_limit);
+
+    let short_sink = Arc::new(SinkStats::default());
+    let short_stats = short.write_with_stats(
+        "fraw",
+        Box::new(StatsWriter(short_sink.clone())) as Destination,
+    )?;
+    let tall_sink = Arc::new(SinkStats::default());
+    let tall_stats = tall.write_with_stats(
+        "fraw",
+        Box::new(StatsWriter(tall_sink.clone())) as Destination,
+    )?;
+    assert_eq!(short_stats.backend, Backend::Scalar);
+    assert_eq!(tall_stats.backend, Backend::Scalar);
+    assert!(short_stats.peak_managed_bytes > 0);
+    assert!(tall_stats.peak_managed_bytes > 0);
+    assert!(short_stats.peak_managed_bytes >= short_plan.managed_bytes);
+    assert!(tall_stats.peak_managed_bytes >= tall_plan.managed_bytes);
+    assert!(short_stats.peak_managed_bytes <= memory_limit);
+    assert!(tall_stats.peak_managed_bytes <= memory_limit);
+    assert_eq!(
+        short_stats.peak_managed_bytes,
+        tall_stats.peak_managed_bytes
+    );
+    assert!(short_sink.calls.load(Ordering::Relaxed) >= short_height as usize + 3);
+    assert!(tall_sink.calls.load(Ordering::Relaxed) >= tall_height as usize + 3);
+    assert_eq!(
+        short_sink.bytes.load(Ordering::Relaxed),
+        12 + width as usize * short_height as usize * 3
+    );
+    assert_eq!(
+        tall_sink.bytes.load(Ordering::Relaxed),
+        12 + width as usize * tall_height as usize * 3
+    );
+    Ok(())
+}
+
+#[test]
+fn gaussian_blur_preserves_constant_image_even_when_image_is_smaller_than_radius() -> Result<()> {
+    let input = [73; 3 * 2 * 3];
+    let output = render(&input, 3, 2, GaussianBlur::new(2.0), Backend::Scalar)?;
+    assert_eq!(output, input);
+    Ok(())
+}
+
+#[test]
+fn memory_budget_and_corrupt_input_return_errors() -> Result<()> {
+    let limited = limited_raw_engine(Backend::Scalar, 1)?;
+    let pixels = vec![120; 4 * 4 * 3];
+    let image = limited.open_source(source(
+        raw_image(4, 4, &pixels),
+        Arc::new(AtomicUsize::new(0)),
+    ))?;
+    let capture = Capture::default();
+    let result = image.write(
+        "fraw",
+        Box::new(SharedWriter(capture.0.clone())) as Destination,
+    );
+    assert!(matches!(result, Err(Error::Limit(_))));
+
+    let engine = engine()?;
+    let corrupt = engine.open_source(source(
+        b"not a supported image".to_vec(),
+        Arc::new(AtomicUsize::new(0)),
+    ));
+    assert!(corrupt.is_err());
+
+    let mut invalid_dimensions = MAGIC.to_vec();
+    invalid_dimensions.extend_from_slice(&0_u32.to_le_bytes());
+    invalid_dimensions.extend_from_slice(&1_u32.to_le_bytes());
+    assert!(
+        engine
+            .open_source(source(invalid_dimensions, Arc::new(AtomicUsize::new(0)),))
+            .is_err()
+    );
+
+    // Metadata is cheap to inspect, but this enormous row must fail the managed
+    // allocation budget before execution attempts to allocate pixel buffers.
+    let huge_engine = limited_raw_engine(Backend::Scalar, 1024)?;
+    match huge_engine.open_source(generated_source(u32::MAX, u32::MAX)) {
+        Err(Error::Limit(_)) => (), // The packed RGB row is unaddressable on 32-bit targets.
+        Ok(image) => {
+            let huge = image.apply(GaussianBlur::new(1.0))?;
+            let plan = huge.explain()?;
+            assert!(plan.managed_bytes > 1024);
+            assert!(matches!(
+                huge.write("fraw", Box::new(std::io::sink())),
+                Err(Error::Limit(_))
+            ));
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(())
+}
+
+#[test]
+fn save_keeps_existing_destination_when_stream_is_truncated() -> Result<()> {
+    let original = b"preserve the old output";
+    let full = raw_image(3, 2, &[80; 18]);
+    let mut truncated = full.clone();
+    truncated.truncate(12 + 3 * 3);
+    let opens = Arc::new(AtomicUsize::new(0));
+    let opens_for_source = opens.clone();
+    let image = engine()?.open_source(move || {
+        let bytes = if opens_for_source.fetch_add(1, Ordering::SeqCst) == 0 {
+            full.clone()
+        } else {
+            truncated.clone()
+        };
+        Ok(Box::new(Cursor::new(bytes)))
+    })?;
+
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("existing.fraw");
+    std::fs::write(&path, original)?;
+    let result = image.apply(Brightness::new(0.1))?.save(&path);
+    assert!(matches!(result, Err(Error::Codec(_))));
+    assert_eq!(std::fs::read(&path)?, original);
+    Ok(())
+}
+
+#[cfg(all(feature = "png", feature = "jpeg"))]
+#[test]
+fn png_to_jpeg_file_conversion() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("input.data");
+    let output = dir.path().join("output.JpG");
+    let file = std::fs::File::create(&input)?;
+    let mut encoder = png::Encoder::new(file, 2, 2);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder
+        .write_header()
+        .map_err(|e| Error::Codec(e.to_string()))?;
+    writer
+        .write_image_data(&[255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255])
+        .map_err(|e| Error::Codec(e.to_string()))?;
+    drop(writer);
+
+    Image::open(&input)?.save(&output)?;
+    let encoded = std::fs::read(&output)?;
+    assert!(
+        encoded.starts_with(&[0xff, 0xd8]),
+        "expected JPEG SOI marker"
+    );
+    assert!(encoded.ends_with(&[0xff, 0xd9]), "expected JPEG EOI marker");
+    Ok(())
+}

@@ -1,0 +1,15 @@
+[workspace]
+members = ["crates/*", "plugins/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/North-Foundry/flint"
+
+[workspace.dependencies]
+flint-sdk = { path = "crates/flint-sdk", version = "0.1.0" }
+flint-core = { path = "crates/flint-core", version = "0.1.0" }
+flint-png = { path = "plugins/flint-png", version = "0.1.0" }
+flint-jpeg = { path = "plugins/flint-jpeg", version = "0.1.0" }
+flint-basic = { path = "plugins/flint-basic", version = "0.1.0" }

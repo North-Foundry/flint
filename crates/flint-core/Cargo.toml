@@ -1,0 +1,10 @@
+[package]
+name = "flint-core"
+description = "Streaming execution runtime for Flint"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+flint-sdk.workspace = true
+wide = "1.4"

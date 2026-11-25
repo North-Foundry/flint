@@ -1,0 +1,11 @@
+[package]
+name = "flint-png"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+description = "Streaming PNG decoding and encoding for Flint"
+
+[dependencies]
+flint-sdk.workspace = true
+# The strict reader relies on this version's chunk allocation and inflater behavior.
+png = "=0.18.1"

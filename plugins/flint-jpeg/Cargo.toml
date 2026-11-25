@@ -1,0 +1,16 @@
+[package]
+name = "flint-jpeg"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+description = "Streaming baseline JPEG encoding for Flint"
+
+[dependencies]
+flint-sdk.workspace = true
+mozjpeg-sys = { version = "2.2.3", default-features = false }
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+mozjpeg-sys = { version = "2.2.3", default-features = false, features = ["with_simd"] }
+
+[build-dependencies]
+cc = "1.2"

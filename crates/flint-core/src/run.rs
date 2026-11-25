@@ -1,5 +1,5 @@
 use self::{
-    eval::{Scratch, evaluate_row},
+    evaluation::{Scratch, evaluate_row},
     rows::{Ring, pack, unpack},
 };
 use crate::{
@@ -12,7 +12,7 @@ use flint_sdk::{
     graph::Stage,
 };
 
-mod eval;
+mod evaluation;
 mod rows;
 
 /**

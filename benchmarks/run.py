@@ -97,6 +97,45 @@ def key_values(output: str) -> dict[str, str]:
     return dict(re.findall(r"^([a-z_]+)=(.*)$", output, re.MULTILINE))
 
 
+def comparison_rows(rows: list[dict]) -> list[dict]:
+    """Pair successful optimization modes and calculate checksum-guarded speedups."""
+    grouped: dict[tuple, dict[str, dict]] = {}
+    for row in rows:
+        if row.get("kind") != "in_process_ops":
+            continue
+        key = (row["operation"], row["width"], row["height"], row["requested_backend"], row["repetition"])
+        grouped.setdefault(key, {})[row["optimization"]] = row
+    comparisons = []
+    for key, modes in grouped.items():
+        disabled, automatic = modes.get("Disabled"), modes.get("Auto")
+        if not disabled or not automatic:
+            continue
+        checksum_match = (
+            disabled.get("ok") and automatic.get("ok")
+            and disabled["checksum"] == automatic["checksum"]
+            and disabled.get("selected_backend") == automatic.get("selected_backend")
+        )
+        comparisons.append({
+            "operation": key[0], "width": key[1], "height": key[2],
+            "requested_backend": key[3], "repetition": key[4],
+            "disabled_selected_backend": disabled.get("selected_backend"),
+            "auto_selected_backend": automatic.get("selected_backend"),
+            "checksum_match": bool(checksum_match),
+            "speedup": disabled["seconds"] / automatic["seconds"]
+                if checksum_match and automatic["seconds"] else None,
+            "disabled_seconds": disabled.get("seconds"), "auto_seconds": automatic.get("seconds"),
+            "disabled_planning_seconds": disabled.get("planning_seconds"),
+            "auto_planning_seconds": automatic.get("planning_seconds"),
+            "disabled_peak_managed_bytes": disabled.get("peak_managed_bytes"),
+            "auto_peak_managed_bytes": automatic.get("peak_managed_bytes"),
+            "disabled_estimated_managed_bytes": disabled.get("estimated_managed_bytes"),
+            "auto_estimated_managed_bytes": automatic.get("estimated_managed_bytes"),
+            "disabled_peak_rss_bytes": disabled.get("peak_rss_bytes"),
+            "auto_peak_rss_bytes": automatic.get("peak_rss_bytes"),
+        })
+    return comparisons
+
+
 def jpeg_size(path: Path) -> int | None:
     try:
         size = path.stat().st_size
@@ -157,10 +196,16 @@ def main() -> int:
     parser.add_argument("--flint-convert", nargs="+", help="conversion command; use {input} and {output} placeholders")
     parser.add_argument("--flint-ops", nargs="+", help="in-process example command; use {width}, {height}, {backend}, {operation}, {iterations}")
     parser.add_argument("--iterations", type=int, default=3)
+    parser.add_argument("--repetitions", type=int, default=3, help="fresh-process repetitions per in-process case")
     parser.add_argument("--width", type=int, default=256, help="fixed width for memory scaling")
+    parser.add_argument("--full-matrix", action="store_true", help="include long chains and edge image dimensions")
+    parser.add_argument("--include-8k", action="store_true", help="add a minimal 8192x8192 in-process sample")
+    parser.add_argument("--baseline-matrix", action="store_true", help="use original dimensions and workload set")
     args = parser.parse_args()
-    if args.iterations < 1 or args.width < 1:
-        parser.error("iterations and width must be positive")
+    if args.iterations < 1 or args.repetitions < 1 or args.width < 1:
+        parser.error("iterations, repetitions, and width must be positive")
+    if (args.full_matrix or args.include_8k) and args.baseline_matrix:
+        parser.error("expanded matrices and --baseline-matrix are mutually exclusive")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     commands = tool_commands()
     flint_manifest = Path("crates/flint/Cargo.toml")
@@ -186,7 +231,7 @@ def main() -> int:
         print("SKIP Flint conversion: pass --flint-convert or provide crates/flint/Cargo.toml", file=sys.stderr)
     flint_ops = args.flint_ops
     if not flint_ops and ops_bin:
-        flint_ops = [str(ops_bin), "{width}", "{height}", "{backend}", "{operation}", "{iterations}"]
+        flint_ops = [str(ops_bin), "{width}", "{height}", "{backend}", "{operation}", "{iterations}", "{optimization}"]
     if not flint_ops:
         print("SKIP Flint in-process operations: pass --flint-ops or add the Cargo package", file=sys.stderr)
     versions = {
@@ -203,7 +248,14 @@ def main() -> int:
 
     rows = []
     dimensions = [(640, 480), (1920, 1080), *((args.width, h) for h in (512, 2048, 8192))]
-    fixtures = [(w, h, p) for w, h in dimensions[:2] for p in PATTERNS]
+    if args.full_matrix:
+        dimensions = [(640, 480), (1920, 1080), (3840, 2160),
+                      (16, 16), (1, 257), (17, 9), (4096, 1),
+                      (args.width, 512), (args.width, 2048), (args.width, 8192)]
+    if args.include_8k:
+        dimensions.append((8192, 8192))
+    # Codec dimensions stay fixed regardless of the evaluator matrix selection.
+    fixtures = [(w, h, p) for w, h in ((640, 480), (1920, 1080)) for p in PATTERNS]
     fixtures.extend((args.width, h, "noise") for h in (512, 2048, 8192))
     with tempfile.TemporaryDirectory(prefix="flint-bench-") as temp:
         tempdir = Path(temp)
@@ -259,58 +311,100 @@ def main() -> int:
                         )
 
         if flint_ops:
-            for width, height in dimensions:
+            legacy_operations = ("grayscale", "blur", "combined")
+            standard_operations = ("brightness", "grayscale", "blur", "combined", "chain2", "color_mix", "mixed",
+                                   "brightness_grayscale_brightness", "color_grayscale_contrast", "chain_blur_chain")
+            chain_operations = tuple(name for length in (5, 10, 20, 50)
+                                     for name in (f"chain{length}", f"expensive_chain{length}")) + ("expensive_chain2",)
+            supports_mode = any("{optimization}" in part for part in flint_ops)
+            if args.baseline_matrix:
+                matrix_cases = [(dimension, legacy_operations) for dimension in dimensions]
+            elif args.full_matrix:
+                matrix_cases = [
+                    ((640, 480), standard_operations + chain_operations + ("expensive",)),
+                    ((1920, 1080), ("brightness", "grayscale", "chain2", "chain5", "chain10",
+                                    "color_grayscale_contrast", "chain_blur_chain")),
+                    ((3840, 2160), ("brightness", "grayscale", "chain5", "color_mix",
+                                    "color_grayscale_contrast", "chain_blur_chain")),
+                    *((dimension, ("brightness", "grayscale", "chain2"))
+                      for dimension in ((16, 16), (1, 257), (17, 9), (4096, 1),
+                                        (args.width, 512), (args.width, 2048), (args.width, 8192))),
+                ]
+                if args.include_8k:
+                    matrix_cases.append(((8192, 8192), ("grayscale",)))
+            elif args.include_8k:
+                matrix_cases = [((8192, 8192), ("grayscale",))]
+            elif not supports_mode:
+                # Preserve the historical workload contract for existing adapters.
+                matrix_cases = [(dimension, legacy_operations) for dimension in dimensions]
+            else:
+                matrix_cases = [(dimension, standard_operations) for dimension in dimensions[:2]]
+            mode_sweep = ("Disabled", "Auto") if supports_mode else ("Auto",)
+            for (width, height), operations in matrix_cases:
                 for backend in ("Scalar", "Simd"):
-                    for operation in ("grayscale", "blur", "combined"):
-                        argv = [
-                            s.format(width=width, height=height, backend=backend,
-                                     operation=operation, iterations=args.iterations)
-                            for s in flint_ops
-                        ]
-                        report = run_one(argv)
-                        details = key_values(report.get("stdout", ""))
-                        required = {"elapsed_seconds", "megapixels_per_second", "backend",
-                                    "peak_managed_bytes", "estimated_managed_bytes", "checksum"}
-                        error = report.get("stderr") if report.get("returncode") else None
-                        if report.get("returncode") == 0 and not required <= details.keys():
-                            error = "missing benchmark output fields"
-                        ok = report.get("returncode") == 0 and error is None
-                        rows.append({
-                            "kind": "in_process_ops",
-                            "tool": "Flint",
-                            "requested_backend": backend,
-                            "selected_backend": details.get("backend"),
-                            "operation": operation,
-                            "width": width,
-                            "height": height,
-                            "ok": ok,
-                            "seconds": float(details["elapsed_seconds"]) if ok else None,
-                            "megapixels_per_second": float(details["megapixels_per_second"]) if ok else None,
-                            "peak_rss_bytes": report.get("peak_rss_bytes"),
-                            "peak_managed_bytes": int(details["peak_managed_bytes"]) if ok else None,
-                            "estimated_managed_bytes": int(details["estimated_managed_bytes"]) if ok else None,
-                            "checksum": details.get("checksum"),
-                            "returncode": report.get("returncode"),
-                            "error": error,
-                        })
-                        if not ok:
-                            print(f"FAILED run: {backend} {operation} {width}x{height}: {error}", file=sys.stderr)
+                    for operation in operations:
+                        for optimization in mode_sweep:
+                            for repetition in range(args.repetitions):
+                                argv = [
+                                    part.format(width=width, height=height, backend=backend,
+                                                operation=operation, iterations=args.iterations,
+                                                optimization=optimization)
+                                    for part in flint_ops
+                                ]
+                                report = run_one(argv)
+                                details = key_values(report.get("stdout", ""))
+                                required = {"elapsed_seconds", "megapixels_per_second", "backend",
+                                            "peak_managed_bytes", "estimated_managed_bytes", "checksum"}
+                                error = report.get("stderr") if report.get("returncode") else None
+                                if report.get("returncode") == 0 and not required <= details.keys():
+                                    error = "missing benchmark output fields"
+                                ok = report.get("returncode") == 0 and error is None
+                                def numeric(name: str) -> float | None:
+                                    return float(details[name]) if ok and name in details else None
+                                def integer(name: str) -> int | None:
+                                    return int(details[name]) if ok and name in details else None
+                                rows.append({
+                                    "kind": "in_process_ops", "tool": "Flint",
+                                    "requested_backend": backend, "selected_backend": details.get("backend"),
+                                    "optimization": details.get("optimization", optimization),
+                                    "operation": operation, "width": width, "height": height,
+                                    "repetition": repetition, "ok": ok,
+                                    "seconds": numeric("elapsed_seconds"),
+                                    "megapixels_per_second": numeric("megapixels_per_second"),
+                                    "planning_seconds": numeric("planning_seconds"),
+                                    "stages": integer("stages"), "kernels": integer("kernels"),
+                                    "instruction_count": integer("instruction_count"),
+                                    "temporary_workspace_bytes": integer("temporary_workspace_bytes"),
+                                    "peak_rss_bytes": report.get("peak_rss_bytes"),
+                                    "peak_managed_bytes": integer("peak_managed_bytes"),
+                                    "estimated_managed_bytes": integer("estimated_managed_bytes"),
+                                    "checksum": details.get("checksum"),
+                                    "returncode": report.get("returncode"), "error": error,
+                                })
+                                if not ok:
+                                    print(f"FAILED run: {backend} {optimization} {operation} {width}x{height}: {error}", file=sys.stderr)
     result_path = args.output_dir / "results.json"
     result_path.write_text(json.dumps({
         "settings": {
             "jpeg_quality": 85,
             "sampling_factor": "4:2:0 for Flint/libvips/ImageMagick, PHP GD default",
             "iterations": args.iterations,
+            "repetitions": args.repetitions,
+            "full_matrix": args.full_matrix,
+            "include_8k": args.include_8k,
+            "baseline_matrix": args.baseline_matrix,
             "fixtures": fixtures,
             "internal_dimensions": dimensions,
             "internal_pixels": "synthetic deterministic RGB8 rows, generated incrementally in Rust",
         },
         "versions": versions,
         "results": rows,
+        "comparisons": comparison_rows(rows),
     }, indent=2) + "\n")
     print(result_path)
     has_flint = bool((args.flint_convert or convert_bin) and flint_ops)
-    return int(not has_flint or any(not row["ok"] for row in rows))
+    checksum_failure = any(not comparison["checksum_match"] for comparison in comparison_rows(rows))
+    return int(not has_flint or any(not row["ok"] for row in rows) or checksum_failure)
 
 
 if __name__ == "__main__":

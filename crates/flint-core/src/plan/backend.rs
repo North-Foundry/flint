@@ -24,6 +24,13 @@ pub enum Backend {
 
 impl Backend {
     /**
+     * Report whether this resolved backend will evaluate any four-pixel groups.
+     */
+    pub(crate) fn uses_vectors(self, width: u32) -> bool {
+        self == Self::Simd && width >= 4
+    }
+
+    /**
      * Resolve automatic selection and fall back to scalar when SIMD is unavailable.
      */
     pub fn resolved(self) -> Self {

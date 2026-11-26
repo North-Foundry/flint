@@ -1,11 +1,12 @@
 /*!
- * Per-row evaluation for symbolic graph stages.
+ * Per-row evaluation for original and fused kernels.
  *
  * The evaluator is the compute kernel used by `run::execute`. It reads planar
  * `f32` samples from a bounded ring of input rows, interprets a stage's postfix
  * programs for each output pixel, and writes one planar output row. The same
  * interpreter is specialized for scalar `f32` and four-lane `f32x4`
- * arithmetic.
+ * arithmetic. Fused pointwise programs evaluate all live channel values per
+ * pixel or SIMD group before writing the final planes.
  *
  * This module owns no image storage. `Scratch` provides reusable operand
  * stacks, while the caller guarantees that every sampled row is present in the
@@ -14,20 +15,22 @@
  */
 
 use super::{buffer, offset, rows::Ring};
-use crate::Backend;
+use crate::plan::{PointwiseProgram, Value};
 use flint_sdk::{
     Expr, Result,
     graph::{Instruction, Stage},
 };
 use wide::f32x4;
 
+#[cfg(test)]
+mod tests;
+
 /**
- * Reusable operand stacks for one execution backend.
+ * Reusable operands or temporary values for the selected backend.
  *
- * The scalar stack is always allocated at the maximum postfix depth of the
- * graph. The vector stack exists only for the SIMD backend, so scalar
- * execution does not reserve vector memory. Slots above the live depth are
- * never read, so the stacks do not need to be cleared between rows.
+ * Each kernel uses the same scratch for either stack operands or fused
+ * values. Every invocation writes a slot before reading it. The vector
+ * allocation exists when a full SIMD group fits, alongside scalar scratch.
  */
 pub(super) struct Scratch {
     scalar: Vec<f32>,
@@ -36,17 +39,16 @@ pub(super) struct Scratch {
 
 impl Scratch {
     /**
-     * Allocate the operand stacks for the requested postfix depth.
+     * Allocate workspace once for the maximum number of live slots.
      *
-     * `depth` is the maximum number of live operands reported by `StagePlan`.
-     * A scalar backend leaves the vector stack empty; allocation failures
-     * become `Error::Limit` through `buffer`.
+     * Allocate vector storage only when requested. Allocation failures become
+     * `Error::Limit` through `buffer`.
      */
-    pub(super) fn new(depth: usize, backend: Backend) -> Result<Self> {
+    pub(super) fn new(slots: usize, use_vectors: bool) -> Result<Self> {
         Ok(Self {
-            scalar: buffer(depth, 0.0)?,
-            vector: if backend == Backend::Simd {
-                buffer(depth, f32x4::ZERO)?
+            scalar: buffer(slots, 0.0)?,
+            vector: if use_vectors {
+                buffer(slots, f32x4::ZERO)?
             } else {
                 Vec::new()
             },
@@ -61,6 +63,72 @@ impl Scratch {
      */
     pub(super) fn capacity_bytes(&self) -> usize {
         self.scalar.capacity() * size_of::<f32>() + self.vector.capacity() * size_of::<f32x4>()
+    }
+}
+
+/**
+ * Execute a pointwise value program once per pixel or SIMD group, then write
+ * its live output values to the corresponding planar channels.
+ */
+pub(super) fn evaluate_pointwise_row(
+    program: &PointwiseProgram,
+    input: &Ring,
+    row_index: usize,
+    output: &mut [f32],
+    scratch: &mut Scratch,
+) {
+    let width = input.info().width() as usize;
+    let row = input.row(row_index);
+    let mut vector_end = 0;
+    if !scratch.vector.is_empty() {
+        vector_end = width / 4 * 4;
+        for column in (0..vector_end).step_by(4) {
+            evaluate_values(program, row, width, column, &mut scratch.vector);
+            for (plane, &slot) in output.chunks_exact_mut(width).zip(&program.outputs) {
+                plane[column..column + 4]
+                    .copy_from_slice(&scratch.vector[usize::from(slot)].to_array());
+            }
+        }
+    }
+    for column in vector_end..width {
+        evaluate_values(program, row, width, column, &mut scratch.scalar);
+        for (plane, &slot) in output.chunks_exact_mut(width).zip(&program.outputs) {
+            plane[column] = scratch.scalar[usize::from(slot)];
+        }
+    }
+}
+
+/**
+ * Evaluate the live definitions in order, retaining final channels in scratch.
+ * Lowering ensures each operand is initialized earlier in this invocation.
+ */
+#[inline]
+fn evaluate_values<T: Lane>(
+    program: &PointwiseProgram,
+    row: &[f32],
+    width: usize,
+    column: usize,
+    values: &mut [T],
+) {
+    for instruction in &program.instructions {
+        let value = match instruction.value {
+            Value::Input(channel) => {
+                let start = usize::from(channel) * width;
+                T::sample(&row[start..][..width], column, 0)
+            }
+            Value::Constant(bits) => T::splat(f32::from_bits(bits)),
+            Value::Add(left, right) => values[usize::from(left)] + values[usize::from(right)],
+            Value::Subtract(left, right) => values[usize::from(left)] - values[usize::from(right)],
+            Value::Multiply(left, right) => values[usize::from(left)] * values[usize::from(right)],
+            Value::Divide(left, right) => values[usize::from(left)] / values[usize::from(right)],
+            Value::Minimum(left, right) => {
+                values[usize::from(left)].min(values[usize::from(right)])
+            }
+            Value::Maximum(left, right) => {
+                values[usize::from(left)].max(values[usize::from(right)])
+            }
+        };
+        values[usize::from(instruction.destination)] = value;
     }
 }
 

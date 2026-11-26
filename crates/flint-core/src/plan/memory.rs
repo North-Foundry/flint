@@ -2,7 +2,7 @@
  * Managed working-memory accounting for execution plans.
  */
 
-use super::{backend::Backend, stage_plan::StagePlan};
+use super::{Backend, KernelPlan};
 use flint_sdk::{Error, ImageInformation, Result};
 use std::mem::size_of;
 use wide::f32x4;
@@ -11,36 +11,55 @@ use wide::f32x4;
  * Estimate the bytes needed by the runtime's reusable pixel and evaluator buffers.
  *
  * The estimate covers the packed source row, the packed output row, one
- * floating-point ring per stage, the final output ring, and the evaluator
- * operand stacks. Codec-owned state and graph metadata are excluded.
+ * floating-point ring per kernel, the final output ring, and the shared stack
+ * and value workspace. Codec state and immutable plan data are excluded.
  */
 pub(super) fn estimate_managed_bytes(
     source: ImageInformation,
     output: ImageInformation,
-    stages: &[StagePlan],
+    kernels: &[KernelPlan],
     backend: Backend,
 ) -> Result<usize> {
     let mut managed_bytes = source.row_bytes();
-    let mut max_stack = 0;
-    if !stages.is_empty() {
+    if !kernels.is_empty() {
         managed_bytes = add(managed_bytes, output.row_bytes())?;
-        for stage in stages {
+        for kernel in kernels {
             managed_bytes = add(
                 managed_bytes,
-                float_ring_bytes(stage.input, stage.buffered_rows)?,
+                float_ring_bytes(kernel.input, kernel.buffered_rows)?,
             )?;
-            max_stack = max_stack.max(stage.stack_depth);
         }
         managed_bytes = add(managed_bytes, float_ring_bytes(output, 1)?)?;
-        let scratch = size_of::<f32>()
-            + if backend == Backend::Simd {
-                size_of::<f32x4>()
-            } else {
-                0
-            };
-        managed_bytes = add(managed_bytes, multiply(max_stack, scratch)?)?;
+        managed_bytes = add(
+            managed_bytes,
+            multiply(scratch_slots(kernels), lane_bytes(backend, source.width()))?,
+        )?;
     }
     Ok(managed_bytes)
+}
+
+/**
+ * Return the shared workspace length, since each kernel runs to completion
+ * before another kernel uses the same scratch.
+ */
+pub(super) fn scratch_slots(kernels: &[KernelPlan]) -> usize {
+    kernels
+        .iter()
+        .map(|kernel| kernel.stack_depth.max(kernel.temporary_values))
+        .max()
+        .unwrap_or(0)
+}
+
+/**
+ * Return the scalar slot size plus vector storage when a full group fits.
+ */
+pub(super) fn lane_bytes(backend: Backend, width: u32) -> usize {
+    size_of::<f32>()
+        + if backend.uses_vectors(width) {
+            size_of::<f32x4>()
+        } else {
+            0
+        }
 }
 
 /**
@@ -65,7 +84,7 @@ pub(crate) fn float_ring_bytes(info: ImageInformation, rows: usize) -> Result<us
 /**
  * Add two sizes, reporting overflow as a resource limit.
  */
-fn add(a: usize, b: usize) -> Result<usize> {
+pub(crate) fn add(a: usize, b: usize) -> Result<usize> {
     a.checked_add(b).ok_or_else(size_error)
 }
 

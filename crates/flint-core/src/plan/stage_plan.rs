@@ -45,6 +45,10 @@ pub struct StagePlan {
      */
     pub buffered_rows: usize,
     /**
+     * Instructions executed for all output channels of one pixel or SIMD group.
+     */
+    pub instruction_count: usize,
+    /**
      * Maximum live operands in the stage's postfix programs.
      */
     pub(crate) stack_depth: usize,
@@ -114,6 +118,24 @@ pub(super) fn analyze_stage(stage: &Stage, output: ImageInformation) -> StagePla
         min_y,
         max_y,
         buffered_rows,
+        instruction_count: if stage.programs().len() == 1 {
+            stage.programs()[0].instructions().len() * output.format().channels()
+        } else {
+            stage
+                .programs()
+                .iter()
+                .map(|program| program.instructions().len())
+                .sum()
+        },
         stack_depth,
+    }
+}
+
+impl StagePlan {
+    /**
+     * Report whether all symbolic sample offsets are zero.
+     */
+    pub(super) fn is_pointwise(&self) -> bool {
+        (self.min_x, self.max_x, self.min_y, self.max_y) == (0, 0, 0, 0)
     }
 }

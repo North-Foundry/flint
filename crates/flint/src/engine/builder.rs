@@ -1,5 +1,5 @@
 use super::{Engine, EngineSettings};
-use crate::Backend;
+use crate::{Backend, Optimization};
 use flint_sdk::{Decoder, Encoder, Error, Result};
 use std::sync::Arc;
 
@@ -19,6 +19,15 @@ impl EngineBuilder {
      */
     pub fn backend(mut self, backend: Backend) -> Self {
         self.0.backend = backend;
+        self
+    }
+
+    /**
+     * Select pointwise kernel fusion independently of the execution backend.
+     * The default is automatic.
+     */
+    pub fn optimization(mut self, optimization: Optimization) -> Self {
+        self.0.optimization = optimization;
         self
     }
 

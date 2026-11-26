@@ -10,7 +10,7 @@ use flint::sdk::{
     Decoder, Destination, Encoder, ImageExpression, ImageInformation, Operation, Pixel,
     PixelFormat, Rows, RowsMut, Source,
 };
-use flint::{Backend, Engine, Error, Result};
+use flint::{Backend, Engine, Error, Optimization, Result};
 use flint_basic::{Brightness, GaussianBlur, Grayscale};
 
 const MAGIC: &[u8; 4] = b"FRAW";
@@ -228,6 +228,23 @@ fn limited_raw_engine(backend: Backend, memory_limit: usize) -> Result<Engine> {
         .build()
 }
 
+/**
+ * Build a raw-codec engine with explicit backend, optimization, and memory settings.
+ */
+fn configured_raw_engine(
+    backend: Backend,
+    optimization: Optimization,
+    memory_limit: usize,
+) -> Result<Engine> {
+    Engine::builder()
+        .backend(backend)
+        .optimization(optimization)
+        .memory_limit(memory_limit)
+        .register_decoder::<RawDecoder>()
+        .register_encoder::<RawEncoder>()
+        .build()
+}
+
 struct CountingReader {
     inner: Cursor<Vec<u8>>,
     bytes_read: Arc<AtomicUsize>,
@@ -318,6 +335,63 @@ fn render<O: flint::sdk::Operation>(
         Box::new(SharedWriter(capture.0.clone())) as Destination,
     )?;
     Ok(capture.bytes()[12..].to_vec())
+}
+
+/**
+ * Render an operation through a public engine configured for one optimization mode.
+ */
+fn render_configured<O: Operation>(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    operation: O,
+    backend: Backend,
+    optimization: Optimization,
+) -> Result<Vec<u8>> {
+    let capture = Capture::default();
+    let engine = configured_raw_engine(backend, optimization, 1_000_000)?;
+    engine
+        .open_source(source(
+            raw_image(width, height, pixels),
+            Arc::new(AtomicUsize::new(0)),
+        ))?
+        .apply(operation)?
+        .write(
+            "fraw",
+            Box::new(SharedWriter(capture.0.clone())) as Destination,
+        )?;
+    Ok(capture.bytes()[12..].to_vec())
+}
+
+/**
+ * Assert byte equality between automatic and disabled optimization for one graph.
+ */
+fn assert_optimization_matches<O: Operation>(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    backend: Backend,
+    operation: impl Fn() -> O,
+) -> Result<()> {
+    assert_eq!(
+        render_configured(
+            pixels,
+            width,
+            height,
+            operation(),
+            backend,
+            Optimization::Auto,
+        )?,
+        render_configured(
+            pixels,
+            width,
+            height,
+            operation(),
+            backend,
+            Optimization::Disabled,
+        )?,
+    );
+    Ok(())
 }
 
 fn reference_brightness(pixels: &[u8], amount: f32) -> Vec<u8> {
@@ -807,5 +881,336 @@ fn png_to_jpeg_file_conversion() -> Result<()> {
         "expected JPEG SOI marker"
     );
     assert!(encoded.ends_with(&[0xff, 0xd9]), "expected JPEG EOI marker");
+    Ok(())
+}
+
+/**
+ * Construct a multi-channel pointwise chain with clamps and repeated channel use.
+ */
+struct ChannelMixPipeline;
+
+impl Operation for ChannelMixPipeline {
+    /**
+     * Add channel transforms whose order and intermediate clamp affect the result.
+     */
+    fn apply(&self, image: flint::sdk::ImageExpression) -> Result<flint::sdk::ImageExpression> {
+        image
+            .map_pixel(|pixel| {
+                Pixel::rgb(
+                    (pixel.r.clone() - 0.25).clamp(0.0, 1.0),
+                    (pixel.g * 1.75 - 0.4).clamp(0.0, 1.0),
+                    (pixel.b + pixel.r * 0.5).clamp(0.0, 1.0),
+                )
+            })?
+            .map_pixel(|pixel| {
+                Pixel::gray(pixel.r.clone() * pixel.r.clone() + pixel.r.clone() * pixel.g + pixel.r)
+            })?
+            .map_color(|value| (value - 0.1).max(0.0).min(1.0))
+    }
+}
+
+/**
+ * Build a bounded chain of pointwise stages for fusion and streaming checks.
+ */
+struct LongPointwisePipeline(usize);
+
+impl Operation for LongPointwisePipeline {
+    /**
+     * Append deterministic affine stages while keeping the original graph public.
+     */
+    fn apply(&self, mut image: flint::sdk::ImageExpression) -> Result<flint::sdk::ImageExpression> {
+        for index in 0..self.0 {
+            let amount = (index % 5) as f32 * 0.007 - 0.01;
+            image = image.map_color(|value| (value + amount).max(0.0).min(1.0))?;
+        }
+        Ok(image)
+    }
+}
+
+/**
+ * Build a zero-offset stencil to verify that its actual sampling is pointwise.
+ */
+struct ZeroOffsetStencil;
+
+impl Operation for ZeroOffsetStencil {
+    /**
+     * Return each channel's value from the current pixel.
+     */
+    fn apply(&self, image: flint::sdk::ImageExpression) -> Result<flint::sdk::ImageExpression> {
+        image.stencil(|neighborhood| neighborhood.at(0, 0))
+    }
+}
+
+/**
+ * Build a pointwise, zero-offset-stencil, pointwise chain.
+ */
+struct ZeroOffsetPipeline;
+
+impl Operation for ZeroOffsetPipeline {
+    /**
+     * Place a zero-offset stencil between two arithmetic stages.
+     */
+    fn apply(&self, image: flint::sdk::ImageExpression) -> Result<flint::sdk::ImageExpression> {
+        let image = image.map_color(|value| value + 0.05)?;
+        let image = ZeroOffsetStencil.apply(image)?;
+        image.map_color(|value| (value - 0.025).max(0.0).min(1.0))
+    }
+}
+
+/**
+ * Produce exceptional floating-point values through the public pixel expression API.
+ */
+struct ExceptionalValues;
+
+impl Operation for ExceptionalValues {
+    /**
+     * Emit exceptional values, then apply a second stage before final packing.
+     */
+    fn apply(&self, image: flint::sdk::ImageExpression) -> Result<flint::sdk::ImageExpression> {
+        image
+            .map_pixel(|_| Pixel::rgb(f32::NAN, f32::INFINITY, -0.0))?
+            .map_color(|value| (value - 0.25).max(-0.5))
+    }
+}
+
+/**
+ * Exercise fused kernels on both sides of a separable blur.
+ */
+struct MixedGaussianPipeline;
+
+impl Operation for MixedGaussianPipeline {
+    /**
+     * Build pointwise groups before and after the horizontal and vertical passes.
+     */
+    fn apply(&self, image: ImageExpression) -> Result<ImageExpression> {
+        let image = Brightness::new(0.17).apply(image)?;
+        let image = image.map_color(|value| value * 1.125 - 0.2)?;
+        let image = GaussianBlur::new(1.0).apply(image)?;
+        let image = Grayscale.apply(image)?;
+        Brightness::new(0.08).apply(image)
+    }
+}
+
+/**
+ * Return a write error on the first codec output attempt.
+ */
+struct FailingWriter;
+
+impl Write for FailingWriter {
+    /**
+     * Fail the write so the encoder error reaches the public image API.
+     */
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("intentional test writer failure"))
+    }
+
+    /**
+     * Accept flushes; writes are the deliberate failure point.
+     */
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/**
+ * Compare every backend and optimization setting for channel and exceptional pipelines.
+ */
+#[test]
+fn optimized_pipeline_matches_disabled_bytes_for_all_backends() -> Result<()> {
+    let pixels: Vec<u8> = (0..11 * 3)
+        .map(|index| ((index * 73 + index * index * 11 + 29) % 256) as u8)
+        .collect();
+    let exceptional_pixel = [128, 64, 192];
+    for backend in [Backend::Scalar, Backend::Simd] {
+        assert_optimization_matches(&pixels, 11, 1, backend, || ChannelMixPipeline)?;
+        assert_optimization_matches(&exceptional_pixel, 1, 1, backend, || ExceptionalValues)?;
+        assert_optimization_matches(&pixels, 11, 1, backend, || ExceptionalValues)?;
+        assert_optimization_matches(&pixels, 11, 1, backend, || LongPointwisePipeline(24))?;
+        assert_optimization_matches(&pixels, 11, 1, backend, || ShiftLeftThenDown)?;
+        assert_optimization_matches(&pixels, 11, 1, backend, || ZeroOffsetPipeline)?;
+    }
+    Ok(())
+}
+
+/**
+ * Check that both Gaussian passes retain their spatial dependencies and that
+ * reading through their ring windows yields the original bytes at every row.
+ */
+#[test]
+fn mixed_gaussian_kernels_preserve_rows_and_boundaries() -> Result<()> {
+    let (width, height) = (11, 18);
+    let pixels: Vec<_> = (0..width * height * 3)
+        .map(|position| (position * 73 + position / 13 * 19) as u8)
+        .collect();
+    for backend in [Backend::Scalar, Backend::Simd] {
+        assert_optimization_matches(&pixels, width, height, backend, || MixedGaussianPipeline)?;
+        let image = configured_raw_engine(backend, Optimization::Auto, 1_000_000)?
+            .open_source(generated_source(width, height))?
+            .apply(MixedGaussianPipeline)?;
+        let plan = image.explain()?;
+        let ranges: Vec<_> = plan
+            .kernels
+            .iter()
+            .map(|kernel| kernel.stages.clone())
+            .collect();
+        assert_eq!(ranges, [0..2, 2..3, 3..4, 4..6]);
+        assert_eq!(plan.kernels[1].min_x, -3);
+        assert_eq!(plan.kernels[2].max_y, 3);
+        assert_eq!(plan.kernels[2].buffered_rows, 7);
+        let statistics = image.write_with_statistics("fraw", Box::new(std::io::sink()))?;
+        assert_eq!(statistics.peak_managed_bytes, plan.managed_bytes);
+    }
+    Ok(())
+}
+
+/**
+ * Check kernel ranges, dependencies, temporary workspace, and execution statistics.
+ */
+#[test]
+fn execution_plan_reports_fusion_and_preserves_original_stages() -> Result<()> {
+    let image = configured_raw_engine(Backend::Scalar, Optimization::Auto, 1_000_000)?
+        .open_source(generated_source(7, 3))?
+        .apply(Brightness::new(0.1))?
+        .apply(Brightness::new(0.2))?;
+    let plan = image.explain()?;
+    assert_eq!(plan.stages.len(), 2);
+    assert_eq!(plan.kernels.len(), 1);
+    assert_eq!(plan.kernels[0].stages, 0..2);
+    assert_eq!(plan.kernels[0].input, plan.source);
+    assert_eq!(plan.kernels[0].output, plan.output);
+    assert!(plan.kernels[0].instruction_count > 0);
+    assert!(plan.kernels[0].temporary_values > 0);
+    assert_eq!((plan.kernels[0].min_x, plan.kernels[0].max_x), (0, 0));
+    assert_eq!((plan.kernels[0].min_y, plan.kernels[0].max_y), (0, 0));
+    assert!(plan.kernels[0].buffered_rows > 0);
+    assert!(plan.temporary_workspace_bytes() <= plan.managed_bytes);
+
+    let stencil_image = configured_raw_engine(Backend::Scalar, Optimization::Auto, 1_000_000)?
+        .open_source(generated_source(7, 3))?
+        .apply(Brightness::new(0.1))?
+        .apply(ShiftLeftThenDown)?
+        .apply(Brightness::new(0.2))?;
+    let stencil_plan = stencil_image.explain()?;
+    assert_eq!(stencil_plan.stages.len(), 4);
+    assert_eq!(stencil_plan.kernels.len(), 4);
+    assert_eq!(stencil_plan.kernels[0].stages, 0..1);
+    assert_eq!(stencil_plan.kernels[1].stages, 1..2);
+    assert_eq!(stencil_plan.kernels[2].stages, 2..3);
+    assert_eq!(stencil_plan.kernels[3].stages, 3..4);
+    assert_eq!(stencil_plan.kernels[1].min_x, -1);
+    assert_eq!(stencil_plan.kernels[2].max_y, 1);
+
+    let zero_offset_plan = configured_raw_engine(Backend::Scalar, Optimization::Auto, 1_000_000)?
+        .open_source(generated_source(7, 3))?
+        .apply(Brightness::new(0.1))?
+        .apply(ZeroOffsetStencil)?
+        .explain()?;
+    assert_eq!(zero_offset_plan.kernels.len(), 1);
+    assert_eq!(zero_offset_plan.kernels[0].stages, 0..2);
+    assert_eq!(zero_offset_plan.kernels[0].min_x, 0);
+    assert_eq!(zero_offset_plan.kernels[0].max_y, 0);
+
+    let capture = Capture::default();
+    let statistics = image.write_with_statistics(
+        "fraw",
+        Box::new(SharedWriter(capture.0.clone())) as Destination,
+    )?;
+    assert_eq!(statistics.original_stage_count, 2);
+    assert_eq!(statistics.kernel_count, 1);
+    assert!(statistics.peak_managed_bytes >= plan.temporary_workspace_bytes());
+    Ok(())
+}
+
+/**
+ * Verify an over-budget plan stays inspectable and optimized working memory is bounded.
+ */
+#[test]
+fn fused_memory_budget_is_height_independent_and_inspectable() -> Result<()> {
+    let width = 9;
+    let optimized_engine = configured_raw_engine(Backend::Scalar, Optimization::Auto, 1_000_000)?;
+    let short = optimized_engine
+        .open_source(generated_source(width, 32))?
+        .apply(LongPointwisePipeline(24))?;
+    let tall = optimized_engine
+        .open_source(generated_source(width, 10_000))?
+        .apply(LongPointwisePipeline(24))?;
+    let short_plan = short.explain()?;
+    let tall_plan = tall.explain()?;
+    assert_eq!(short_plan.kernels.len(), 1);
+    assert_eq!(short_plan.managed_bytes, tall_plan.managed_bytes);
+
+    let disabled = configured_raw_engine(
+        Backend::Scalar,
+        Optimization::Disabled,
+        short_plan.managed_bytes,
+    )?
+    .open_source(generated_source(width, 32))?
+    .apply(LongPointwisePipeline(24))?;
+    let disabled_plan = disabled.explain()?;
+    assert!(disabled_plan.managed_bytes > short_plan.managed_bytes);
+    assert!(matches!(
+        disabled.write("fraw", Box::new(std::io::sink())),
+        Err(Error::Limit(_))
+    ));
+
+    let budgeted = configured_raw_engine(
+        Backend::Scalar,
+        Optimization::Auto,
+        short_plan.managed_bytes,
+    )?
+    .open_source(generated_source(width, 32))?
+    .apply(LongPointwisePipeline(24))?;
+    let budgeted_capture = Capture::default();
+    let budgeted_statistics = budgeted.write_with_statistics(
+        "fraw",
+        Box::new(SharedWriter(budgeted_capture.0.clone())) as Destination,
+    )?;
+    assert!(budgeted_statistics.peak_managed_bytes <= short_plan.managed_bytes);
+
+    let tall_capture = Capture::default();
+    let tall_statistics = tall.write_with_statistics(
+        "fraw",
+        Box::new(SharedWriter(tall_capture.0.clone())) as Destination,
+    )?;
+    assert!(tall_statistics.peak_managed_bytes <= short_plan.managed_bytes);
+    Ok(())
+}
+
+/**
+ * Preserve codec failures with and without stages, including a fused graph.
+ */
+#[test]
+fn direct_and_fused_paths_propagate_codec_errors() -> Result<()> {
+    let mut truncated = raw_image(3, 2, &[80; 18]);
+    truncated.truncate(12 + 3 * 3);
+    for operation in [false, true] {
+        let image = configured_raw_engine(Backend::Scalar, Optimization::Auto, 1_000_000)?
+            .open_source(source(truncated.clone(), Arc::new(AtomicUsize::new(0))))?;
+        let image = if operation {
+            image
+                .apply(Brightness::new(0.1))?
+                .apply(Brightness::new(0.2))?
+        } else {
+            image
+        };
+        assert!(matches!(
+            image.write("fraw", Box::new(std::io::sink())),
+            Err(Error::Codec(_))
+        ));
+
+        let complete = configured_raw_engine(Backend::Scalar, Optimization::Auto, 1_000_000)?
+            .open_source(generated_source(3, 2))?;
+        let complete = if operation {
+            complete
+                .apply(Brightness::new(0.1))?
+                .apply(Brightness::new(0.2))?
+        } else {
+            complete
+        };
+        assert!(matches!(
+            complete.write("fraw", Box::new(FailingWriter)),
+            Err(Error::Io(_)) | Err(Error::Codec(_))
+        ));
+    }
     Ok(())
 }

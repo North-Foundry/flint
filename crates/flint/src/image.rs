@@ -1,5 +1,5 @@
 use crate::{Engine, ExecutionPlan, ExecutionStatistics};
-use flint_core::{SelectedDecoder, SelectedEncoder, execute};
+use flint_core::{ExecutionOptions, SelectedDecoder, SelectedEncoder, execute_with_options};
 use flint_sdk::{Destination, Error, ImageExpression, ImageInformation, Operation, Result, Source};
 use std::{
     path::Path,
@@ -78,14 +78,17 @@ impl Image {
     }
 
     /**
-     * Analyze the expression graph and metadata to report the selected backend,
-     * row dependencies, and estimated working memory.
+     * Report the backend, executable kernels, and estimated working memory.
+     * Uses the same optimization and budget decisions as execution.
      */
     pub fn explain(&self) -> Result<ExecutionPlan> {
-        ExecutionPlan::analyze(
+        let settings = self.engine.settings();
+        ExecutionPlan::analyze_with_optimization(
             &self.expression,
             self.decoder.name(),
-            self.engine.settings().backend,
+            settings.backend,
+            settings.optimization,
+            settings.memory_limit,
         )
     }
 
@@ -154,10 +157,13 @@ impl Image {
         destination: Destination,
     ) -> Result<ExecutionStatistics> {
         let settings = self.engine.settings();
-        execute(
+        execute_with_options(
             &self.expression,
-            settings.backend,
-            settings.memory_limit,
+            ExecutionOptions {
+                backend: settings.backend,
+                optimization: settings.optimization,
+                memory_limit: settings.memory_limit,
+            },
             &*self.source,
             self.decoder,
             encoder,

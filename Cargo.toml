@@ -12,4 +12,4 @@ flint-sdk = { path = "crates/flint-sdk", version = "0.1.0" }
 flint-core = { path = "crates/flint-core", version = "0.1.0" }
 flint-png = { path = "plugins/flint-png", version = "0.1.0" }
 flint-jpeg = { path = "plugins/flint-jpeg", version = "0.1.0" }
-flint-basic = { path = "plugins/flint-basic", version = "0.1.0" }
+flint-imaging = { path = "plugins/flint-imaging", version = "0.1.0" }

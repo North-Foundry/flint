@@ -11,7 +11,10 @@ use flint::sdk::{
     PixelFormat, Rows, RowsMut, Source,
 };
 use flint::{Backend, Engine, Error, Optimization, Result};
-use flint_basic::{Brightness, GaussianBlur, Grayscale};
+use flint_imaging::{
+    blur::GaussianBlur,
+    color::{Brightness, Grayscale},
+};
 
 const MAGIC: &[u8; 4] = b"FRAW";
 

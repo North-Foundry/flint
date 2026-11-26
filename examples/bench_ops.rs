@@ -16,7 +16,10 @@ use flint::{
         Rows, RowsMut, Source,
     },
 };
-use flint_basic::{Brightness, GaussianBlur, Grayscale};
+use flint_imaging::{
+    blur::GaussianBlur,
+    color::{Brightness, Grayscale},
+};
 
 const MAGIC: &[u8; 4] = b"FBR1";
 

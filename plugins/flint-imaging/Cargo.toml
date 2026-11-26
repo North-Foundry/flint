@@ -1,9 +1,9 @@
 [package]
-name = "flint-basic"
+name = "flint-imaging"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
-description = "Basic image operations for Flint"
+description = "Image-processing operations for Flint"
 
 [dependencies]
 flint-sdk.workspace = true

@@ -97,8 +97,8 @@ dependencies = [
 name = "flint"
 version = "0.1.0"
 dependencies = [
- "flint-basic",
  "flint-core",
+ "flint-imaging",
  "flint-jpeg",
  "flint-png",
  "flint-sdk",
@@ -107,18 +107,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "flint-basic"
-version = "0.1.0"
-dependencies = [
- "flint-sdk",
-]
-
-[[package]]
 name = "flint-core"
 version = "0.1.0"
 dependencies = [
  "flint-sdk",
  "wide",
+]
+
+[[package]]
+name = "flint-imaging"
+version = "0.1.0"
+dependencies = [
+ "flint-sdk",
 ]
 
 [[package]]

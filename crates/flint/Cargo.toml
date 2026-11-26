@@ -18,7 +18,7 @@ flint-jpeg = { workspace = true, optional = true }
 tempfile = "3"
 
 [dev-dependencies]
-flint-basic.workspace = true
+flint-imaging.workspace = true
 png = "0.18"
 
 [[test]]

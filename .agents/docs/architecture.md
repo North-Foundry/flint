@@ -1,6 +1,17 @@
 # Architecture
 
-The `flint` facade opens files and source factories, owns engine settings, and enables the default codecs. `flint-sdk` defines the graph, symbolic expressions, and generic row I/O. `flint-core` analyzes and runs graphs and holds the codec factory registry. The three plugin crates implement codecs and algorithms through the SDK.
+The `flint` facade opens files and source factories, owns engine settings, and enables the default codecs. `flint-sdk` defines the graph, symbolic expressions, and generic row I/O. `flint-core` analyzes and runs graphs and holds the codec factory registry. The plugin crates implement codecs and algorithms through the SDK.
+
+## Crate responsibilities
+
+| Crate | Responsibility |
+| --- | --- |
+| `flint` | Public facade and consumer API |
+| `flint-core` | Planning, optimization, and execution runtime |
+| `flint-sdk` | Public extension contracts and symbolic primitives |
+| `flint-imaging` | Official collection of image-processing algorithms |
+| `flint-png` | PNG codec |
+| `flint-jpeg` | JPEG codec |
 
 A symbolic image has a source node followed by immutable operation nodes with references to their inputs. Clones share the graph. Each operation can append stages, and a stage can change the number of channels. Source dimensions remain fixed. The initial runtime follows a single chain. Future multi-input nodes can extend the graph representation alongside their scheduling rules.
 

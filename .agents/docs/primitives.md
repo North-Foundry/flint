@@ -8,4 +8,6 @@
 
 Closures run once during graph construction. A Gray8 input supplies the same sample for all three `map_pixel` fields. A stencil reads from the previous stage and uses clamp-to-edge on both axes. Offsets are integers bounded by `MAX_STENCIL_OFFSET`.
 
-`flint-basic` shows all three contracts. Brightness maps and clamps each channel. Grayscale uses weighted encoded RGB samples. Gaussian blur generates a normalized kernel and composes horizontal and vertical stencil stages.
+`flint-imaging` shows all three contracts. Brightness maps and clamps each
+channel. Grayscale uses weighted encoded RGB samples. Gaussian blur generates a
+normalized kernel and composes horizontal and vertical stencil stages.

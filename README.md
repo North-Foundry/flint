@@ -14,7 +14,7 @@ Operations compose through the same API.
 
 ```rust
 use flint::{Engine, Result};
-use flint_basic::{GaussianBlur, Grayscale};
+use flint_imaging::{blur::GaussianBlur, color::Grayscale};
 
 fn main() -> Result<()> {
     let engine = Engine::builder().memory_limit(32 * 1024 * 1024).build()?;
@@ -26,6 +26,10 @@ fn main() -> Result<()> {
     image.save("output.jpg")
 }
 ```
+
+Official operations live in `flint-imaging`, grouped by semantic category. Each
+operation is also re-exported from the crate root when a single import is more
+convenient.
 
 ## Supported images
 

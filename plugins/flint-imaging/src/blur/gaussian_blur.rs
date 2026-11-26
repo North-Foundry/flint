@@ -1,47 +1,31 @@
-//! Basic image operations built only from Flint's public SDK.
+/*!
+ * Gaussian blur.
+ */
 
-use flint_sdk::{Error, Expr, ImageExpression, Operation, Pixel, Result};
+use flint_sdk::{Error, Expr, ImageExpression, Operation, Result};
 
-/// Adds an amount to every normalized color channel.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Brightness {
-    amount: f32,
-}
-
-impl Brightness {
-    pub const fn new(amount: f32) -> Self {
-        Self { amount }
-    }
-}
-
-impl Operation for Brightness {
-    fn apply(&self, image: ImageExpression) -> Result<ImageExpression> {
-        image.map_color(|x| (x + self.amount).clamp(0.0, 1.0))
-    }
-}
-
-/// Converts RGB pixels to grayscale using encoded-space luma coefficients.
-/// The weights apply directly to the stored RGB samples.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Grayscale;
-
-impl Operation for Grayscale {
-    fn apply(&self, image: ImageExpression) -> Result<ImageExpression> {
-        image.map_pixel(|p| Pixel::gray(p.r * 0.2126 + p.g * 0.7152 + p.b * 0.0722))
-    }
-}
-
-/// Applies a separable Gaussian blur, using a finite radius of `ceil(3σ)`.
+/**
+ * Applies a separable Gaussian blur, using a finite radius of `ceil(3σ)`.
+ */
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GaussianBlur {
     sigma: f32,
 }
 
 impl GaussianBlur {
+    /**
+     * Creates a Gaussian blur with the given standard deviation in pixels.
+     */
     pub const fn new(sigma: f32) -> Self {
         Self { sigma }
     }
 
+    /**
+     * Resolves the stencil radius for the configured sigma.
+     *
+     * Returns an error when sigma is not finite or not greater than zero, and
+     * when the radius exceeds the SDK's maximum stencil offset.
+     */
     fn radius(&self) -> Result<i32> {
         if !self.sigma.is_finite() || self.sigma <= 0.0 {
             return Err(Error::Invalid(
@@ -62,6 +46,9 @@ impl GaussianBlur {
         Ok(radius as i32)
     }
 
+    /**
+     * Builds normalized one-dimensional Gaussian weights for `radius`.
+     */
     fn weights(&self, radius: i32) -> Vec<f32> {
         let sigma = self.sigma as f64;
         let denom = 2.0 * sigma * sigma;
@@ -77,6 +64,9 @@ impl GaussianBlur {
 }
 
 impl Operation for GaussianBlur {
+    /**
+     * Composes a horizontal and a vertical stencil stage from one kernel.
+     */
     fn apply(&self, image: ImageExpression) -> Result<ImageExpression> {
         let radius = self.radius()?;
         let weights = self.weights(radius);

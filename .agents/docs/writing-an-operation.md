@@ -16,6 +16,42 @@ edition = "2024"
 flint-sdk = { path = "../../crates/flint-sdk" }
 ```
 
+## Source organization
+
+Each operation lives in its own source file under a semantic category module.
+`lib.rs` and category `mod.rs` files declare modules, document the category,
+and re-export public types; they do not contain algorithms.
+
+```text
+plugins/flint-imaging/
+├── Cargo.toml
+└── src/
+    ├── lib.rs
+    ├── color/
+    │   ├── mod.rs
+    │   ├── brightness.rs
+    │   └── grayscale.rs
+    └── blur/
+        ├── mod.rs
+        └── gaussian_blur.rs
+```
+
+Choose the category that describes the effect, such as `color`, `blur`,
+`sharpen`, `geometry`, `noise`, `morphology`, `edge`, `composite`, or
+`distortion`. Do not create an empty category. Introduce a shared helper only
+when multiple operations genuinely need it.
+
+Official operations are available through their category or the crate root.
+
+```rust
+use flint_imaging::blur::GaussianBlur;
+use flint_imaging::color::{Brightness, Grayscale};
+```
+
+Extension crates, including `flint-imaging`, depend exclusively on
+`flint-sdk`. They describe computations through the public symbolic primitives;
+the runtime owns iteration, buffers, sampling, SIMD, and backend selection.
+
 ## Complete operation
 
 This operation adds a different normalized amount to each RGB channel. `map_pixel` also declares the output pixel format through `Pixel::rgb`.

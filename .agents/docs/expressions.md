@@ -7,3 +7,7 @@ Byte samples are normalized as `f32::from(sample) / 255.0`. Every stage operates
 Division uses floating-point semantics. Min and max choose the numeric operand if exactly one operand is NaN. Clamp applies max with the lower bound, then min with the upper bound. Final packing clamps into the unit interval, multiplies by 255, and rounds to nearest with ties up. NaN becomes 0, negative infinity becomes 0, and positive infinity becomes 255.
 
 The SDK accepts at most 65,536 instructions in a program and 128 stages per graph. The runtime plan accounts for evaluator workspace. Symbolic graph construction and its memory are separate from the engine budget.
+
+The planner can compose pointwise postfix programs into a core-private value
+program. It preserves the order of the operands and shares exactly identical
+definitions across consumers. See [kernel fusion](optimizer.md).

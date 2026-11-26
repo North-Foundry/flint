@@ -7,7 +7,9 @@ A symbolic image has a source node followed by immutable operation nodes with re
 A conversion has three phases.
 
 1. Opening reads a short prefix, picks the most recent matching decoder, and opens its session for metadata.
-2. Applying operations constructs the graph. Explaining it derives spatial dependencies, storage, and backend from metadata and symbolic instructions.
-3. Saving or writing opens a fresh decoder and the selected encoder. The runtime pulls rows through the graph and finishes both codec sessions.
+2. Applying operations constructs the graph. Planning derives executable kernels, spatial dependencies, storage, and backend from metadata and symbolic instructions. Explaining uses the same planner.
+3. Saving or writing plans the kernels and opens a fresh decoder and the selected encoder. The runtime pulls rows through the kernels and finishes both codec sessions.
+
+See [kernel fusion](optimizer.md) for expression composition and kernel selection.
 
 A future dynamic loader can register factories backed by a versioned C ABI. Keep Rust traits, allocation ownership, and object layouts on the Rust side of that adapter. The current registry contains Rust factory functions for statically linked plugins.

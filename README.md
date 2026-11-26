@@ -35,7 +35,9 @@ PNG input and output support non-interlaced Gray8 and RGB8. The PNG decoder reje
 
 JPEG output is baseline sequential at quality 85 by default, with 4:2:0 sampling for color. JPEG input is deferred. The bundled JPEG encoder needs a C compiler and enables MozJPEG's NEON support on AArch64 toolchains that support it.
 
-The default managed memory budget is 64 MiB and covers runtime pixel buffers and evaluator scratch space. `explain()` estimates those bytes. `save_with_statistics()` and `write_with_statistics()` report measured peak buffer capacity and the selected backend after a successful run. Codec allocations and process RSS are separate measurements.
+Flint automatically fuses compatible pointwise operations into streaming kernels. This removes intermediate rows while preserving the graph's numerical behavior. Operation developers describe their computations through the SDK and Flint handles fusion and SIMD. Use `Engine::builder().optimization(Optimization::Disabled)` to compare execution with fusion disabled.
+
+The default managed memory budget is 64 MiB and covers runtime pixel buffers and evaluator scratch space. `explain()` reports original stages, selected kernels, and estimated bytes. `save_with_statistics()` and `write_with_statistics()` report kernel counts, measured peak buffer capacity, and the selected backend after a successful run. Codec allocations and process RSS are separate measurements.
 
 ## Build and extend
 
@@ -47,4 +49,4 @@ cargo run -p flint --example independent_operation -- input.png output.png
 python3 benchmarks/run.py --output-dir benchmarks/output
 ```
 
-[Architecture](.agents/docs/architecture.md) · [Write an operation](.agents/docs/writing-an-operation.md) · [Write a decoder](.agents/docs/writing-a-decoder.md) · [Write an encoder](.agents/docs/writing-an-encoder.md) · [Benchmarks](benchmarks/README.md)
+[Architecture](.agents/docs/architecture.md) · [Kernel fusion](.agents/docs/optimizer.md) · [Write an operation](.agents/docs/writing-an-operation.md) · [Write a decoder](.agents/docs/writing-a-decoder.md) · [Write an encoder](.agents/docs/writing-an-encoder.md) · [Benchmarks](benchmarks/README.md)

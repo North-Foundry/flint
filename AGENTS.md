@@ -11,7 +11,7 @@ guides in `.agents/docs/` before editing.
 | [Code style](.agents/docs/code-style.md) | Write or modify Rust code. |
 | [Symbolic primitives](.agents/docs/primitives.md) | Work with the symbolic building blocks used in expressions. |
 | [Expressions](.agents/docs/expressions.md) | Change expression construction or execution. |
-| [Kernel fusion](.agents/docs/optimizer.md) | Change executable kernels, fusion, or profitability policy. |
+| [Symbolic optimization](.agents/docs/optimizer.md) | Change constant folding, executable kernels, fusion, or profitability policy. |
 | [Streaming](.agents/docs/streaming.md) | Change execution while preserving row streaming and graph laziness. |
 | [SIMD](.agents/docs/simd.md) | Change vectorized execution while preserving numeric behavior. |
 | [Writing an operation](.agents/docs/writing-an-operation.md) | Add or register an operation extension. |

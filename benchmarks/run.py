@@ -130,6 +130,14 @@ def comparison_rows(rows: list[dict]) -> list[dict]:
             "auto_peak_managed_bytes": automatic.get("peak_managed_bytes"),
             "disabled_estimated_managed_bytes": disabled.get("estimated_managed_bytes"),
             "auto_estimated_managed_bytes": automatic.get("estimated_managed_bytes"),
+            "disabled_source_instruction_count": disabled.get("source_instruction_count"),
+            "auto_source_instruction_count": automatic.get("source_instruction_count"),
+            "disabled_instruction_count": disabled.get("instruction_count"),
+            "auto_instruction_count": automatic.get("instruction_count"),
+            "disabled_folded_instructions": disabled.get("folded_instructions"),
+            "auto_folded_instructions": automatic.get("folded_instructions"),
+            "disabled_evaluator_workspace_bytes": disabled.get("evaluator_workspace_bytes"),
+            "auto_evaluator_workspace_bytes": automatic.get("evaluator_workspace_bytes"),
             "disabled_peak_rss_bytes": disabled.get("peak_rss_bytes"),
             "auto_peak_rss_bytes": automatic.get("peak_rss_bytes"),
         })
@@ -201,11 +209,14 @@ def main() -> int:
     parser.add_argument("--full-matrix", action="store_true", help="include long chains and edge image dimensions")
     parser.add_argument("--include-8k", action="store_true", help="add a minimal 8192x8192 in-process sample")
     parser.add_argument("--baseline-matrix", action="store_true", help="use original dimensions and workload set")
+    parser.add_argument("--folding-matrix", action="store_true", help="run only constant-folding in-process workloads and the codec matrix")
     args = parser.parse_args()
     if args.iterations < 1 or args.repetitions < 1 or args.width < 1:
         parser.error("iterations, repetitions, and width must be positive")
     if (args.full_matrix or args.include_8k) and args.baseline_matrix:
         parser.error("expanded matrices and --baseline-matrix are mutually exclusive")
+    if args.folding_matrix and (args.full_matrix or args.include_8k or args.baseline_matrix):
+        parser.error("--folding-matrix cannot be combined with other workload flags")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     commands = tool_commands()
     flint_manifest = Path("crates/flint/Cargo.toml")
@@ -229,9 +240,14 @@ def main() -> int:
         commands.insert(0, ("Flint", [str(convert_bin), "{input}", "{output}"]))
     else:
         print("SKIP Flint conversion: pass --flint-convert or provide crates/flint/Cargo.toml", file=sys.stderr)
+    supports_folding = False
     flint_ops = args.flint_ops
     if not flint_ops and ops_bin:
         flint_ops = [str(ops_bin), "{width}", "{height}", "{backend}", "{operation}", "{iterations}", "{optimization}"]
+        probe = run_one([str(ops_bin), "1", "1", "Scalar", "fold_simple", "1", "Disabled"])
+        supports_folding = probe.get("returncode") == 0 and "folded_instructions" in key_values(probe.get("stdout", ""))
+    if args.folding_matrix and not args.flint_ops and not supports_folding:
+        parser.error("--folding-matrix requires a bench_ops build with folding workloads or a compatible --flint-ops command")
     if not flint_ops:
         print("SKIP Flint in-process operations: pass --flint-ops or add the Cargo package", file=sys.stderr)
     versions = {
@@ -312,12 +328,18 @@ def main() -> int:
 
         if flint_ops:
             legacy_operations = ("grayscale", "blur", "combined")
+            folding_operations = ("fold_simple", "fold_nested", "fold_repeated", "fold_chain",
+                                  "fold_multichannel", "fold_stencil", "fold_none")
             standard_operations = ("brightness", "grayscale", "blur", "combined", "chain2", "color_mix", "mixed",
                                    "brightness_grayscale_brightness", "color_grayscale_contrast", "chain_blur_chain")
+            if supports_folding:
+                standard_operations += folding_operations
             chain_operations = tuple(name for length in (5, 10, 20, 50)
                                      for name in (f"chain{length}", f"expensive_chain{length}")) + ("expensive_chain2",)
             supports_mode = any("{optimization}" in part for part in flint_ops)
-            if args.baseline_matrix:
+            if args.folding_matrix:
+                matrix_cases = [(dimension, folding_operations) for dimension in dimensions[:2]]
+            elif args.baseline_matrix:
                 matrix_cases = [(dimension, legacy_operations) for dimension in dimensions]
             elif args.full_matrix:
                 matrix_cases = [
@@ -355,9 +377,16 @@ def main() -> int:
                                 details = key_values(report.get("stdout", ""))
                                 required = {"elapsed_seconds", "megapixels_per_second", "backend",
                                             "peak_managed_bytes", "estimated_managed_bytes", "checksum"}
+                                if supports_folding:
+                                    required.update({"source_instruction_count", "instruction_count",
+                                                     "folded_instructions", "execution_folded_instructions",
+                                                     "evaluator_workspace_bytes"})
                                 error = report.get("stderr") if report.get("returncode") else None
                                 if report.get("returncode") == 0 and not required <= details.keys():
                                     error = "missing benchmark output fields"
+                                if supports_folding and report.get("returncode") == 0 and error is None:
+                                    if details["folded_instructions"] != details["execution_folded_instructions"]:
+                                        error = "planned and executed fold counts differ"
                                 ok = report.get("returncode") == 0 and error is None
                                 def numeric(name: str) -> float | None:
                                     return float(details[name]) if ok and name in details else None
@@ -374,7 +403,11 @@ def main() -> int:
                                     "planning_seconds": numeric("planning_seconds"),
                                     "stages": integer("stages"), "kernels": integer("kernels"),
                                     "instruction_count": integer("instruction_count"),
+                                    "source_instruction_count": integer("source_instruction_count"),
+                                    "folded_instructions": integer("folded_instructions"),
+                                    "execution_folded_instructions": integer("execution_folded_instructions"),
                                     "temporary_workspace_bytes": integer("temporary_workspace_bytes"),
+                                    "evaluator_workspace_bytes": integer("evaluator_workspace_bytes"),
                                     "peak_rss_bytes": report.get("peak_rss_bytes"),
                                     "peak_managed_bytes": integer("peak_managed_bytes"),
                                     "estimated_managed_bytes": integer("estimated_managed_bytes"),
@@ -393,6 +426,7 @@ def main() -> int:
             "full_matrix": args.full_matrix,
             "include_8k": args.include_8k,
             "baseline_matrix": args.baseline_matrix,
+            "folding_matrix": args.folding_matrix,
             "fixtures": fixtures,
             "internal_dimensions": dimensions,
             "internal_pixels": "synthetic deterministic RGB8 rows, generated incrementally in Rust",

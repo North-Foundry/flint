@@ -4,7 +4,7 @@
 
 use super::{
     Backend, KernelPlan, Optimization,
-    kernel_plan::{KernelProgram, select_kernels},
+    kernel_plan::{KernelProgram, select_kernels, standalone_kernel},
     memory::{estimate_managed_bytes, lane_bytes, scratch_slots},
     stage_plan::{StagePlan, analyze_stage, graph_stages},
 };
@@ -115,6 +115,14 @@ impl ExecutionPlan {
     }
 
     /**
+     * Return the capacity in bytes shared by postfix stacks and fused values.
+     * Includes the scalar workspace and, when used, the SIMD workspace.
+     */
+    pub fn evaluator_workspace_bytes(&self) -> usize {
+        self.scratch_slots() * lane_bytes(self.backend, self.source.width())
+    }
+
+    /**
      * Return the capacity common to temporary values and operand stacks.
      */
     pub(crate) fn scratch_slots(&self) -> usize {
@@ -133,7 +141,7 @@ pub(crate) struct CompiledPlan<'graph> {
 impl<'graph> CompiledPlan<'graph> {
     /**
      * Analyze the source graph once, then choose and size the actual kernels.
-     * If the optimized plan exceeds the budget, consider the unfused plan.
+     * If the optimized plan exceeds the budget, consider keeping stages separate.
      */
     pub(crate) fn prepare(
         image: &'graph ImageExpression,
@@ -156,16 +164,22 @@ impl<'graph> CompiledPlan<'graph> {
                 .as_ref()
                 .is_ok_and(|&bytes| bytes <= memory_limit)
         {
-            let (original_kernels, original_programs) =
-                select_kernels(&stages, Optimization::Disabled, backend);
-            let original_bytes = estimate_managed_bytes(source, output, &original_kernels, backend);
-            if let Ok(bytes) = original_bytes
+            let (standalone_kernels, standalone_programs): (Vec<_>, Vec<_>) = stages
+                .iter()
+                .enumerate()
+                .map(|(index, (stage, analysis))| {
+                    standalone_kernel(index, stage, analysis, optimization, backend)
+                })
+                .unzip();
+            let standalone_bytes =
+                estimate_managed_bytes(source, output, &standalone_kernels, backend);
+            if let Ok(bytes) = standalone_bytes
                 && !managed_bytes
                     .as_ref()
                     .is_ok_and(|&optimized| optimized <= bytes)
             {
-                kernels = original_kernels;
-                programs = original_programs;
+                kernels = standalone_kernels;
+                programs = standalone_programs;
                 managed_bytes = Ok(bytes);
             }
         }
@@ -201,12 +215,12 @@ impl fmt::Display for ExecutionPlan {
         )?;
         write!(
             f,
-            "\n  {:?} optimization, {} original stage(s), {} executable kernel(s), {} intermediate buffer(s) eliminated, {} B temporary workspace",
+            "\n  {:?} optimization, {} original stage(s), {} executable kernel(s), {} intermediate buffer(s) eliminated, {} B evaluator workspace",
             self.optimization,
             self.stages.len(),
             self.kernels.len(),
             self.eliminated_buffers(),
-            self.temporary_workspace_bytes()
+            self.evaluator_workspace_bytes()
         )?;
         for (index, kernel) in self.kernels.iter().enumerate() {
             write!(f, "\n  {}. ", index + 1,)?;
@@ -223,7 +237,7 @@ impl fmt::Display for ExecutionPlan {
             }
             write!(
                 f,
-                ": {:?} → {:?}, x={}..={}, y={}..={}, {} buffered input row(s), {} instruction(s), {} temporary value(s)",
+                ": {:?} → {:?}, x={}..={}, y={}..={}, {} buffered input row(s), {} instruction(s), {} arithmetic instruction(s) folded, {} temporary value slot(s), {} operand stack slot(s)",
                 kernel.input.format(),
                 kernel.output.format(),
                 kernel.min_x,
@@ -232,10 +246,12 @@ impl fmt::Display for ExecutionPlan {
                 kernel.max_y,
                 kernel.buffered_rows,
                 kernel.instruction_count,
-                kernel.temporary_values
+                kernel.folded_instructions,
+                kernel.temporary_values,
+                kernel.stack_depth
             )?;
             if let Some(stages) = original
-                && stages.len() > 1
+                && (stages.len() > 1 || kernel.folded_instructions != 0)
             {
                 let original_count: usize =
                     stages.iter().map(|stage| stage.instruction_count).sum();

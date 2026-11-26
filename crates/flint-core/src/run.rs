@@ -1,5 +1,5 @@
 use self::{
-    evaluation::{Scratch, evaluate_pointwise_row, evaluate_row},
+    evaluation::{Scratch, evaluate_folded_row, evaluate_original_row, evaluate_pointwise_row},
     rows::{Ring, pack, unpack},
 };
 use crate::{
@@ -14,6 +14,8 @@ use flint_sdk::{
 mod evaluation;
 mod rows;
 
+pub(crate) use evaluation::fold_constants;
+
 /**
  * The kernels, selected backend, and measured memory of a completed execution.
  */
@@ -24,6 +26,8 @@ pub struct ExecutionStatistics {
     pub original_stage_count: usize,
     /** Number of executable kernels after planning. */
     pub kernel_count: usize,
+    /** Total source arithmetic occurrences folded, counted per output channel. */
+    pub folded_instructions: usize,
     /// Peak total capacity of managed pixel and evaluator buffers, in bytes.
     pub peak_managed_bytes: usize,
 }
@@ -175,6 +179,11 @@ fn stats(
         backend: plan.backend,
         original_stage_count: plan.stages.len(),
         kernel_count: plan.kernels.len(),
+        folded_instructions: plan
+            .kernels
+            .iter()
+            .map(|kernel| kernel.folded_instructions)
+            .sum(),
         peak_managed_bytes,
     })
 }
@@ -258,7 +267,12 @@ fn pull<'state>(
         let input = pull(source, upstream, scratch, required)?;
         let output = kernel.pixels.row_mut(y);
         match kernel.program {
-            KernelProgram::Original(stage) => evaluate_row(stage, input, y, output, scratch),
+            KernelProgram::Original(stage) => {
+                evaluate_original_row(stage, input, y, output, scratch)
+            }
+            KernelProgram::FoldedPostfix(programs) => {
+                evaluate_folded_row(programs, input, y, output, scratch)
+            }
             KernelProgram::Pointwise(program) => {
                 evaluate_pointwise_row(program, input, y, output, scratch)
             }

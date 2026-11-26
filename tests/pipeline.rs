@@ -7,7 +7,7 @@ use std::sync::{
 #[cfg(all(feature = "png", feature = "jpeg"))]
 use flint::Image;
 use flint::sdk::{
-    Decoder, Destination, Encoder, ImageExpression, ImageInformation, Operation, Pixel,
+    Decoder, Destination, Encoder, Expr, ImageExpression, ImageInformation, Operation, Pixel,
     PixelFormat, Rows, RowsMut, Source,
 };
 use flint::{Backend, Engine, Error, Optimization, Result};
@@ -992,6 +992,104 @@ impl Operation for MixedGaussianPipeline {
 }
 
 /**
+ * Keep constant arithmetic beside input samples in pointwise RGB programs.
+ */
+struct ConstantPointwise;
+
+impl Operation for ConstantPointwise {
+    /**
+     * Retain one sample-dependent arithmetic instruction per output channel.
+     */
+    fn apply(&self, image: ImageExpression) -> Result<ImageExpression> {
+        image.map_pixel(|pixel| {
+            Pixel::rgb(
+                pixel.r * (Expr::from(0.2) + Expr::from(0.3)),
+                pixel.g + (Expr::from(0.8) - Expr::from(0.25)),
+                pixel.b / (Expr::from(0.5) + Expr::from(0.5)),
+            )
+        })
+    }
+}
+
+/**
+ * Change channel count around pointwise stages with constant arithmetic.
+ */
+struct ConstantChannelPipeline;
+
+impl Operation for ConstantChannelPipeline {
+    /**
+     * Propagate constant arithmetic across RGB, gray, and RGB stages.
+     */
+    fn apply(&self, image: ImageExpression) -> Result<ImageExpression> {
+        image
+            .map_pixel(|pixel| {
+                Pixel::gray((pixel.r + pixel.g + pixel.b) / (Expr::from(1.0) + Expr::from(2.0)))
+            })?
+            .map_color(|value| value * (Expr::from(0.25) + Expr::from(0.75)))?
+            .map_pixel(|pixel| {
+                Pixel::rgb(
+                    pixel.r.clone() + (Expr::from(0.1) + Expr::from(0.2)),
+                    pixel.r.clone() * (Expr::from(0.5) + Expr::from(0.5)),
+                    pixel.r - (Expr::from(0.8) - Expr::from(0.3)),
+                )
+            })
+    }
+}
+
+/**
+ * Produce a standalone spatial program with foldable constant arithmetic.
+ */
+struct ConstantStencil(i32, i32);
+
+impl Operation for ConstantStencil {
+    /**
+     * Preserve the selected spatial sample while folding its coefficient.
+     */
+    fn apply(&self, image: ImageExpression) -> Result<ImageExpression> {
+        let (dx, dy) = (self.0, self.1);
+        image.stencil(|neighborhood| neighborhood.at(dx, dy) * (Expr::from(0.2) + Expr::from(0.3)))
+    }
+}
+
+/**
+ * Combine a folded spatial kernel with pointwise kernels on both sides.
+ */
+struct ConstantMixedPipeline;
+
+impl Operation for ConstantMixedPipeline {
+    /**
+     * Preserve the spatial boundary and fuse compatible stages after it.
+     */
+    fn apply(&self, image: ImageExpression) -> Result<ImageExpression> {
+        let image = ConstantPointwise.apply(image)?;
+        let image = ConstantStencil(-1, 1).apply(image)?;
+        ConstantChannelPipeline.apply(image)
+    }
+}
+
+/**
+ * Replace RGB input with three recursively constant output expressions.
+ */
+struct FullyConstantOutput;
+
+impl Operation for FullyConstantOutput {
+    /**
+     * Produce constant RGB values without depending on the input samples.
+     */
+    fn apply(&self, image: ImageExpression) -> Result<ImageExpression> {
+        image.map_pixel(|_| {
+            Pixel::rgb(
+                (Expr::from(0.2) + Expr::from(0.3)) * (Expr::from(2.0) - Expr::from(1.0)),
+                (Expr::from(0.8) - Expr::from(0.3)) / (Expr::from(0.5) + Expr::from(0.5)),
+                (Expr::from(0.1) + Expr::from(0.2))
+                    .max(Expr::from(0.0))
+                    .min(Expr::from(1.0)),
+            )
+        })
+    }
+}
+
+/**
  * Return a write error on the first codec output attempt.
  */
 struct FailingWriter;
@@ -1060,6 +1158,190 @@ fn mixed_gaussian_kernels_preserve_rows_and_boundaries() -> Result<()> {
         let statistics = image.write_with_statistics("fraw", Box::new(std::io::sink()))?;
         assert_eq!(statistics.peak_managed_bytes, plan.managed_bytes);
     }
+    Ok(())
+}
+
+/**
+ * Check folded pointwise arithmetic against disabled optimization across SIMD tails.
+ */
+#[test]
+fn constant_pointwise_folding_matches_backends_and_tails() -> Result<()> {
+    for width in [1, 4, 5, 6, 7, 11] {
+        let pixels: Vec<_> = (0..width * 3)
+            .map(|index| ((index * 47 + 19) % 256) as u8)
+            .collect();
+        for backend in [Backend::Scalar, Backend::Simd] {
+            assert_optimization_matches(&pixels, width as u32, 1, backend, || ConstantPointwise)?;
+            let optimized = configured_raw_engine(backend, Optimization::Auto, 1_000_000)?
+                .open_source(generated_source(width as u32, 1))?
+                .apply(ConstantPointwise)?
+                .explain()?;
+            let disabled = configured_raw_engine(backend, Optimization::Disabled, 1_000_000)?
+                .open_source(generated_source(width as u32, 1))?
+                .apply(ConstantPointwise)?
+                .explain()?;
+            assert_eq!(optimized.kernels.len(), 1);
+            assert_eq!(optimized.kernels[0].folded_instructions, 3);
+            assert_eq!(disabled.kernels[0].folded_instructions, 0);
+        }
+    }
+    Ok(())
+}
+
+/**
+ * Verify standalone stencil folding keeps each horizontal, vertical, and mixed dependency.
+ */
+#[test]
+fn constant_folding_covers_stencils_on_all_axes() -> Result<()> {
+    let (width, height) = (7, 5);
+    let pixels: Vec<_> = (0..width * height * 3)
+        .map(|index| ((index * 31 + 7) % 256) as u8)
+        .collect();
+    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, 1)] {
+        let operation = || ConstantStencil(dx, dy);
+        for backend in [Backend::Scalar, Backend::Simd] {
+            assert_optimization_matches(&pixels, width as u32, height as u32, backend, operation)?;
+        }
+        let plan = configured_raw_engine(Backend::Scalar, Optimization::Auto, 1_000_000)?
+            .open_source(generated_source(width as u32, height as u32))?
+            .apply(operation())?
+            .explain()?;
+        assert_eq!(plan.kernels.len(), 1);
+        assert_eq!(plan.kernels[0].folded_instructions, 3);
+        assert_eq!((plan.kernels[0].min_x, plan.kernels[0].max_x), (dx, dx));
+        assert_eq!((plan.kernels[0].min_y, plan.kernels[0].max_y), (dy, dy));
+    }
+    Ok(())
+}
+
+/**
+ * Verify folding and channel propagation through a fused RGB-to-gray-to-RGB graph.
+ */
+#[test]
+fn constant_folding_propagates_across_fused_channel_changes() -> Result<()> {
+    let (width, height) = (7, 3);
+    let pixels: Vec<_> = (0..width * height * 3)
+        .map(|index| ((index * 59 + 13) % 256) as u8)
+        .collect();
+    for backend in [Backend::Scalar, Backend::Simd] {
+        assert_optimization_matches(&pixels, width as u32, height as u32, backend, || {
+            ConstantChannelPipeline
+        })?;
+        let image = configured_raw_engine(backend, Optimization::Auto, 1_000_000)?
+            .open_source(generated_source(width as u32, height as u32))?
+            .apply(ConstantChannelPipeline)?;
+        let plan = image.explain()?;
+        assert_eq!(plan.kernels.len(), 1);
+        assert!(plan.kernels[0].folded_instructions >= 5);
+        assert!(plan.kernels[0].instruction_count > 0);
+        let statistics = image.write_with_statistics("fraw", Box::new(std::io::sink()))?;
+        assert_eq!(statistics.kernel_count, 1);
+        assert_eq!(
+            statistics.folded_instructions,
+            plan.kernels[0].folded_instructions
+        );
+        assert_eq!(statistics.peak_managed_bytes, plan.managed_bytes);
+        assert!(plan.evaluator_workspace_bytes() <= plan.managed_bytes);
+    }
+    Ok(())
+}
+
+/**
+ * Keep a folded stencil separate between folded pointwise kernels.
+ */
+#[test]
+fn mixed_constant_folding_preserves_spatial_boundaries() -> Result<()> {
+    let pixels: Vec<_> = (0..7 * 3 * 3).map(|index| (index * 23) as u8).collect();
+    for backend in [Backend::Scalar, Backend::Simd] {
+        assert_optimization_matches(&pixels, 7, 3, backend, || ConstantMixedPipeline)?;
+        let plan = configured_raw_engine(backend, Optimization::Auto, 1_000_000)?
+            .open_source(generated_source(7, 3))?
+            .apply(ConstantMixedPipeline)?
+            .explain()?;
+        let ranges: Vec<_> = plan
+            .kernels
+            .iter()
+            .map(|kernel| kernel.stages.clone())
+            .collect();
+        assert_eq!(ranges, [0..1, 1..2, 2..5]);
+        assert_eq!(plan.kernels[1].min_x, -1);
+        assert_eq!(plan.kernels[1].max_y, 1);
+        assert!(
+            plan.kernels
+                .iter()
+                .all(|kernel| kernel.folded_instructions > 0)
+        );
+    }
+    Ok(())
+}
+
+/**
+ * Ensure fully constant output still decodes, streams, accounts memory, and finalizes codecs.
+ */
+#[test]
+fn fully_constant_output_preserves_streaming_and_codec_contracts() -> Result<()> {
+    let width = 7;
+    let engine = configured_raw_engine(Backend::Scalar, Optimization::Auto, 1_000_000)?;
+    let short = engine
+        .open_source(generated_source(width, 3))?
+        .apply(FullyConstantOutput)?;
+    let tall = engine
+        .open_source(generated_source(width, 300))?
+        .apply(FullyConstantOutput)?;
+    let short_plan = short.explain()?;
+    let tall_plan = tall.explain()?;
+    assert_eq!(short_plan.kernels[0].folded_instructions, 9);
+    assert_eq!(short_plan.kernels[0].instruction_count, 3);
+    assert_eq!(short_plan.evaluator_workspace_bytes(), size_of::<f32>());
+    assert_eq!(short_plan.managed_bytes, tall_plan.managed_bytes);
+
+    let budget = short_plan.managed_bytes;
+    let optimized_under_budget =
+        configured_raw_engine(Backend::Scalar, Optimization::Auto, budget)?
+            .open_source(generated_source(width, 3))?
+            .apply(FullyConstantOutput)?;
+    let original_under_budget =
+        configured_raw_engine(Backend::Scalar, Optimization::Disabled, budget)?
+            .open_source(generated_source(width, 3))?
+            .apply(FullyConstantOutput)?;
+    let original_plan = original_under_budget.explain()?;
+    assert_eq!(original_plan.kernels[0].instruction_count, 21);
+    assert!(original_plan.managed_bytes > budget);
+    optimized_under_budget.write("fraw", Box::new(std::io::sink()))?;
+    assert!(matches!(
+        original_under_budget.write("fraw", Box::new(std::io::sink())),
+        Err(Error::Limit(_))
+    ));
+
+    let capture = Capture::default();
+    let statistics = tall.write_with_statistics(
+        "fraw",
+        Box::new(SharedWriter(capture.0.clone())) as Destination,
+    )?;
+    assert_eq!(capture.bytes().len(), 12 + width as usize * 300 * 3);
+    assert!(
+        capture.bytes()[12..]
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .all(|pixel| *pixel == [128, 128, 77])
+    );
+    assert_eq!(statistics.peak_managed_bytes, tall_plan.managed_bytes);
+    assert_eq!(
+        statistics.folded_instructions,
+        tall_plan.kernels[0].folded_instructions
+    );
+    assert!(statistics.peak_managed_bytes <= 1_000_000);
+
+    let mut truncated = raw_image(width, 2, &[90; 2 * 7 * 3]);
+    truncated.truncate(12 + width as usize * 3);
+    let invalid = configured_raw_engine(Backend::Scalar, Optimization::Auto, 1_000_000)?
+        .open_source(source(truncated, Arc::new(AtomicUsize::new(0))))?
+        .apply(FullyConstantOutput)?;
+    assert!(matches!(
+        invalid.write("fraw", Box::new(std::io::sink())),
+        Err(Error::Codec(_))
+    ));
     Ok(())
 }
 

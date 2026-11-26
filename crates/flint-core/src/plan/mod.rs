@@ -23,13 +23,13 @@ pub(crate) use memory::{add, check_budget, float_ring_bytes};
 pub(crate) use optimizer::{PointwiseProgram, Value};
 
 /**
- * Select whether planning can fuse compatible pointwise stages.
+ * Select whether planning can fold constants and fuse compatible pointwise stages.
  */
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Optimization {
-    /** Select profitable fusion groups automatically. */
+    /** Fold safe constant arithmetic and select profitable fusion groups. */
     #[default]
     Auto,
-    /** Execute each original stage in its own kernel. */
+    /** Execute each unmodified stage in its own kernel. */
     Disabled,
 }

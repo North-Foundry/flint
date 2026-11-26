@@ -1,5 +1,5 @@
 /*!
- * Per-row evaluation for original and fused kernels.
+ * Per-row evaluation for standalone and fused kernels.
  *
  * The evaluator is the compute kernel used by `run::execute`. It reads planar
  * `f32` samples from a bounded ring of input rows, interprets a stage's postfix
@@ -20,6 +20,7 @@ use flint_sdk::{
     Expr, Result,
     graph::{Instruction, Stage},
 };
+use std::borrow::Cow;
 use wide::f32x4;
 
 #[cfg(test)]
@@ -133,19 +134,40 @@ fn evaluate_values<T: Lane>(
 }
 
 /**
- * Evaluate one output row of a stage into planar `f32` output.
- *
- * `input` must contain row `y` and every vertical neighbor the stage samples.
- * `output` is laid out as `channels × width`. A single-program stage applies
- * the same expression to every channel; otherwise program `i` computes channel
- * `i`. The SIMD path evaluates four adjacent pixels at a time, then the
- * remaining one to three pixels use the scalar path.
- *
- * This function has no error path because graph construction and planning have
- * already validated channel references, offsets, and depth.
+ * Evaluate an unmodified stage directly from its SDK programs.
  */
-pub(super) fn evaluate_row(
+pub(super) fn evaluate_original_row(
     stage: &Stage,
+    input: &Ring,
+    y: usize,
+    output: &mut [f32],
+    scratch: &mut Scratch,
+) {
+    evaluate_postfix_row(stage.programs(), input, y, output, scratch);
+}
+
+/**
+ * Evaluate a standalone stage that owns one or more compacted programs.
+ */
+pub(super) fn evaluate_folded_row(
+    programs: &[Cow<'_, [Instruction]>],
+    input: &Ring,
+    y: usize,
+    output: &mut [f32],
+    scratch: &mut Scratch,
+) {
+    evaluate_postfix_row(programs, input, y, output, scratch);
+}
+
+/**
+ * Evaluate one planar row using a concrete postfix program representation.
+ * A single program broadcasts to every channel. Planning provides the scratch
+ * depth and the ring contains every row this invocation can sample.
+ * Inline into the two entry points to specialize their inner loops.
+ */
+#[inline(always)]
+fn evaluate_postfix_row(
+    programs: &[impl InstructionProgram],
     input: &Ring,
     y: usize,
     output: &mut [f32],
@@ -153,7 +175,6 @@ pub(super) fn evaluate_row(
 ) {
     // Rows are planar: each channel occupies `width` contiguous samples.
     let width = input.info().width() as usize;
-    let programs = stage.programs();
     for (channel, plane) in output.chunks_exact_mut(width).enumerate() {
         // A one-program stage broadcasts the same expression to all channels.
         let program = &programs[if programs.len() == 1 { 0 } else { channel }];
@@ -266,6 +287,81 @@ impl Lane for f32x4 {
 }
 
 /**
+ * Apply the evaluator's arithmetic to two lanes in operand order.
+ * The caller must supply a binary instruction.
+ */
+#[inline(always)]
+fn apply_binary<T: Lane>(operator: Instruction, left: T, right: T) -> T {
+    match operator {
+        Instruction::Add => left + right,
+        Instruction::Sub => left - right,
+        Instruction::Mul => left * right,
+        Instruction::Div => left / right,
+        Instruction::Min => left.min(right),
+        Instruction::Max => left.max(right),
+        Instruction::Constant(_) | Instruction::Sample { .. } => {
+            unreachable!("non-binary instruction")
+        }
+    }
+}
+
+/**
+ * Fold a binary instruction under Rust's default floating-point environment.
+ * Return `None` for non-binary instructions, NaN results, or differing scalar
+ * and vector result bits when the resolved backend and width use SIMD groups.
+ * The scalar result is needed even then because a row may have a scalar tail.
+ */
+pub(crate) fn fold_constants(
+    operator: Instruction,
+    left: f32,
+    right: f32,
+    use_vectors: bool,
+) -> Option<f32> {
+    if matches!(
+        operator,
+        Instruction::Constant(_) | Instruction::Sample { .. }
+    ) {
+        return None;
+    }
+    let scalar = apply_binary(operator, left, right);
+    if scalar.is_nan() {
+        return None;
+    }
+    if use_vectors {
+        let vector = apply_binary(operator, f32x4::splat(left), f32x4::splat(right));
+        if vector.to_array()[0].to_bits() != scalar.to_bits() {
+            return None;
+        }
+    }
+    Some(scalar)
+}
+
+/**
+ * Read the instructions of a concrete postfix program. Monomorphization keeps
+ * the SDK and folded representations out of each other's evaluator loops.
+ */
+trait InstructionProgram {
+    /**
+     * Borrow the program's instructions in execution order.
+     */
+    fn instructions(&self) -> &[Instruction];
+}
+
+impl InstructionProgram for Expr {
+    #[inline(always)]
+    fn instructions(&self) -> &[Instruction] {
+        Expr::instructions(self)
+    }
+}
+
+impl InstructionProgram for Cow<'_, [Instruction]> {
+    #[inline(always)]
+    fn instructions(&self) -> &[Instruction] {
+        self.as_ref()
+    }
+}
+
+/**
  * Interpret one postfix program for a pixel or a group of four pixels.
  *
  * `(x, y)` is the first output coordinate and `channel` is the output channel
@@ -276,7 +372,7 @@ impl Lane for f32x4 {
  */
 #[inline]
 fn evaluate<T: Lane>(
-    program: &Expr,
+    program: &impl InstructionProgram,
     input: &Ring,
     (x, y): (usize, usize),
     channel: usize,
@@ -310,17 +406,16 @@ fn evaluate<T: Lane>(
                 depth += 1;
             }
             operator => {
-                // Binary operator: pop two operands and push one result.
-                let lhs = stack[depth - 2];
-                let rhs = stack[depth - 1];
+                let left = stack[depth - 2];
+                let right = stack[depth - 1];
                 depth -= 1;
                 stack[depth - 1] = match operator {
-                    Instruction::Add => lhs + rhs,
-                    Instruction::Sub => lhs - rhs,
-                    Instruction::Mul => lhs * rhs,
-                    Instruction::Div => lhs / rhs,
-                    Instruction::Min => lhs.min(rhs),
-                    Instruction::Max => lhs.max(rhs),
+                    Instruction::Add => left + right,
+                    Instruction::Sub => left - right,
+                    Instruction::Mul => left * right,
+                    Instruction::Div => left / right,
+                    Instruction::Min => left.min(right),
+                    Instruction::Max => left.max(right),
                     _ => unreachable!("non-binary instruction"),
                 };
             }

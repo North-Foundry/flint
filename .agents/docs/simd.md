@@ -7,3 +7,9 @@ The postfix and fused value evaluators specialize the same lane arithmetic for s
 The project evaluated Rust's experimental portable SIMD and `wide`. The latter supports stable Rust and generates native arithmetic for both baseline targets without maintaining handwritten intrinsics. [wide source](https://github.com/Lokathor/wide)
 
 Exact final byte equivalence is tested on deterministic inputs. Floating-point NaN payloads and the sign of zero are not part of the output contract. Use the [benchmark harness](../../benchmarks/README.md) for host-specific throughput comparisons.
+
+Planning evaluates constant operands with the same lane arithmetic used at
+runtime, under Rust's default floating-point environment. When a row has SIMD
+groups, a proposed replacement must match the scalar result bit for bit,
+including for widths that have a scalar tail. Min and max apply the runtime's
+positive-zero normalization, and a NaN arithmetic result stays in the program.

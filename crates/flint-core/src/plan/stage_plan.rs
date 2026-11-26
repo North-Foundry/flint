@@ -75,14 +75,40 @@ pub(crate) fn graph_stages(
  * Derive the stage's spatial dependencies and evaluator stack size from its programs.
  */
 pub(super) fn analyze_stage(stage: &Stage, output: ImageInformation) -> StagePlan {
+    analyze_programs(
+        stage,
+        output,
+        stage
+            .programs()
+            .iter()
+            .map(|program| program.instructions()),
+    )
+}
+
+/**
+ * Account for the supplied postfix instructions, which may have been folded.
+ * A single program is shared across every output channel.
+ */
+pub(super) fn analyze_programs<'program>(
+    stage: &Stage,
+    output: ImageInformation,
+    programs: impl ExactSizeIterator<Item = &'program [Instruction]>,
+) -> StagePlan {
     let mut min_x = i32::MAX;
     let mut max_x = i32::MIN;
     let mut min_y = i32::MAX;
     let mut max_y = i32::MIN;
     let mut stack_depth = 0;
-    for program in stage.programs() {
+    let mut instruction_count = 0;
+    let copies = if programs.len() == 1 {
+        output.format().channels()
+    } else {
+        1
+    };
+    for program in programs {
+        instruction_count += program.len() * copies;
         let mut depth = 0;
-        for instruction in program.instructions() {
+        for instruction in program {
             match *instruction {
                 Instruction::Sample { dx, dy, .. } => {
                     min_x = min_x.min(dx);
@@ -118,15 +144,7 @@ pub(super) fn analyze_stage(stage: &Stage, output: ImageInformation) -> StagePla
         min_y,
         max_y,
         buffered_rows,
-        instruction_count: if stage.programs().len() == 1 {
-            stage.programs()[0].instructions().len() * output.format().channels()
-        } else {
-            stage
-                .programs()
-                .iter()
-                .map(|program| program.instructions().len())
-                .sum()
-        },
+        instruction_count,
         stack_depth,
     }
 }
